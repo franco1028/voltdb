@@ -185,10 +185,10 @@ public class TestDDLCompiler extends TestCase {
         int foundCheckWarnings = 0;
         int foundFKWarnings = 0;
         for (VoltCompiler.Feedback f : compiler.m_warnings) {
-            if (f.message.toLowerCase().contains("check")) {
+            if (f.getMessage().toLowerCase().contains("check")) {
                 foundCheckWarnings++;
             }
-            if (f.message.toLowerCase().contains("foreign")) {
+            if (f.getMessage().toLowerCase().contains("foreign")) {
                 foundFKWarnings++;
             }
         }
@@ -362,8 +362,8 @@ public class TestDDLCompiler extends TestCase {
             // verify the warnings exist
             int foundWarnings = 0;
             for (VoltCompiler.Feedback f : compiler.m_warnings) {
-                if (f.message.contains(warningPrefix[expectWarningType[ii]])) {
-                    System.out.println(f.message);
+                if (f.getMessage().contains(warningPrefix[expectWarningType[ii]])) {
+                    System.out.println(f.getMessage());
                     foundWarnings++;
                 }
             }

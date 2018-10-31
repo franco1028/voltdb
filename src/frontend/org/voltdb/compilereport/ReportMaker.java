@@ -927,7 +927,7 @@ public class ReportMaker {
      * Get some embeddable HTML of some generic catalog/application stats
      * that is drawn on the first page of the report.
      */
-    static String getStatsHTML(Database db, long requiredHeap, ArrayList<Feedback> warnings) {
+    static String getStatsHTML(Database db, long requiredHeap, List<Feedback> warnings) {
         StringBuilder sb = new StringBuilder();
         sb.append("<table class='table table-condensed'>\n");
 
@@ -1050,7 +1050,7 @@ public class ReportMaker {
      * Generate the HTML catalog report from a newly compiled VoltDB catalog
      */
     public static String report(Catalog catalog, long minHeap, boolean isPro, int hostCount, int sitesPerHost,
-            int kfactor, ArrayList<Feedback> warnings, String autoGenDDL) throws IOException {
+            int kfactor, List<Feedback> warnings, String autoGenDDL) throws IOException {
         // asynchronously get platform properties
         new Thread() {
             @Override

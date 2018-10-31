@@ -32,7 +32,6 @@ import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.net.URL;
 import java.net.URLDecoder;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -189,8 +188,7 @@ public class TestVoltCompiler extends TestCase {
         return sb.toString();
     }
 
-    private boolean isFeedbackPresent(String expectedError,
-            ArrayList<Feedback> fbs) {
+    private boolean isFeedbackPresent(String expectedError, List<Feedback> fbs) {
         for (Feedback fb : fbs) {
             if (fb.getStandardFeedbackLine().contains(expectedError)) {
                 return true;
@@ -199,9 +197,9 @@ public class TestVoltCompiler extends TestCase {
         return false;
     }
 
-    public void testMismatchedPartitionParams() throws IOException {
+    public void testMismatchedPartitionParams() {
         String expectedError;
-        ArrayList<Feedback> fbs;
+        List<Feedback> fbs;
 
         /**
          * FIXME:
@@ -313,7 +311,7 @@ public class TestVoltCompiler extends TestCase {
         assertTrue(isFeedbackPresent(expectedError, fbs));
     }
 
-    private ArrayList<Feedback> checkPartitionParam(String ddl, String table) {
+    private List<Feedback> checkPartitionParam(String ddl, String table) {
         VoltCompiler compiler = new VoltCompiler(false);
         final boolean success = compileDDL(ddl, compiler);
         assertFalse(success);
@@ -571,7 +569,7 @@ public class TestVoltCompiler extends TestCase {
 
         boolean found = false;
         for (VoltCompiler.Feedback fb : compiler.m_errors) {
-            if (fb.message.indexOf("Partition column") > 0)
+            if (fb.getMessage().indexOf("Partition column") > 0)
                 found = true;
         }
         assertTrue(found);
@@ -609,7 +607,7 @@ public class TestVoltCompiler extends TestCase {
         assertFalse(success);
 
         for (VoltCompiler.Feedback fb : compiler.m_errors) {
-            if (fb.message.startsWith("Table MANY_COLUMNS has")) {
+            if (fb.getMessage().startsWith("Table MANY_COLUMNS has")) {
                 return;
             }
         }
@@ -1455,7 +1453,7 @@ public class TestVoltCompiler extends TestCase {
         assertTrue(c.hasErrorsOrWarnings());
         int foundCount = 0;
         for (VoltCompiler.Feedback f : c.m_warnings) {
-            if (f.message.contains("Dropping index")) {
+            if (f.getMessage().contains("Dropping index")) {
                 foundCount++;
             }
         }
@@ -2563,12 +2561,12 @@ public class TestVoltCompiler extends TestCase {
         final boolean success = compileDDL(schema, compiler);
         assertFalse(success);
         for (Feedback error: compiler.m_errors) {
-            assertEquals(9, error.lineNo);
+            assertEquals(9, error.getLineNumber());
         }
     }
 
     public void testInvalidCreateFunctionDDL() throws Exception {
-        ArrayList<Feedback> fbs;
+        List<Feedback> fbs;
         // Test CREATE FUNCTION syntax
         String[] ddls = new String[] {
                 "CREATE FUNCTION .func FROM METHOD class.method",
@@ -2651,7 +2649,7 @@ public class TestVoltCompiler extends TestCase {
     }
 
     public void testInvalidCreateProcedureDDL() throws Exception {
-        ArrayList<Feedback> fbs;
+        List<Feedback> fbs;
         String expectedError;
 
         fbs = checkInvalidDDL(
@@ -2881,7 +2879,7 @@ public class TestVoltCompiler extends TestCase {
     }
 
     public void testInvalidSingleStatementCreateProcedureDDL() throws Exception {
-        ArrayList<Feedback> fbs;
+        List<Feedback> fbs;
         String expectedError;
 
         fbs = checkInvalidDDL(
@@ -2933,7 +2931,7 @@ public class TestVoltCompiler extends TestCase {
     }
 
     public void testInvalidMultipleStatementCreateProcedureDDL() throws Exception {
-        ArrayList<Feedback> fbs;
+        List<Feedback> fbs;
         String expectedError;
 
         fbs = checkInvalidDDL(
@@ -3046,7 +3044,7 @@ public class TestVoltCompiler extends TestCase {
         proc = db.getProcedures().get("p1");
         assertNull(proc);
 
-        ArrayList<Feedback> fbs = checkInvalidDDL(
+        List<Feedback> fbs = checkInvalidDDL(
                 "CREATE TABLE PKEY_INTEGER ( PKEY INTEGER NOT NULL, DESCR VARCHAR(128), PRIMARY KEY (PKEY) );" +
                 "PARTITION TABLE PKEY_INTEGER ON COLUMN PKEY;" +
                 "creAte PrOcEdUrE partition on table books column cash FrOm CLasS org.voltdb.compiler.procedures.AddBook; " +
@@ -3094,7 +3092,7 @@ public class TestVoltCompiler extends TestCase {
         assertNull(proc);
     }
 
-    private ArrayList<Feedback> checkInvalidDDL(String ddl) {
+    private List<Feedback> checkInvalidDDL(String ddl) {
         VoltCompiler compiler = new VoltCompiler(false);
         final boolean success = compileDDL(ddl, compiler);
         assertFalse(success);
@@ -3177,7 +3175,7 @@ public class TestVoltCompiler extends TestCase {
 
         String error = (success || compiler.m_errors.size() == 0
                             ? ""
-                            : compiler.m_errors.get(compiler.m_errors.size()-1).message);
+                            : compiler.m_errors.get(compiler.m_errors.size()-1).getMessage());
         if (errorRegex == null) {
             assertTrue(String.format("Expected success\nDDL: %s\nERR: %s", ddl, error), success);
 
@@ -3272,7 +3270,7 @@ public class TestVoltCompiler extends TestCase {
             success = compileDDL(schemaDDL, compiler);
             error = (success || compiler.m_errors.size() == 0
                 ? ""
-                : compiler.m_errors.get(compiler.m_errors.size()-1).message);
+                : compiler.m_errors.get(compiler.m_errors.size()-1).getMessage());
         }
         catch (HsqlException hex) {
             success = false;

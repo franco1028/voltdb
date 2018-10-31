@@ -746,9 +746,10 @@ public class CreateTableUtils {
                 case COLUMN_DECL:
                     rowSize += addColumn(new SqlColumnDeclarationWithExpression((SqlColumnDeclaration) col),
                             t, tableName, index, columnTypes);
-                    exceptWhen(rowSize > DDLCompiler.MAX_ROW_SIZE,       // fails when the accumulative row size exeeds limit
+                    exceptWhen(rowSize > DDLCompiler.MAX_ROW_SIZE,
                             String.format("Error: table %s has a maximum row size of %s but the maximum supported size is %s",
-                                    tableName, VoltType.humanReadableSize(rowSize), VoltType.humanReadableSize(DDLCompiler.MAX_ROW_SIZE)));
+                                    tableName, VoltType.humanReadableSize(rowSize),
+                                    VoltType.humanReadableSize(DDLCompiler.MAX_ROW_SIZE)));
                     break;
                 default:
             }

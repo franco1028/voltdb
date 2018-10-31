@@ -37,6 +37,7 @@ import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.tools.ant.taskdefs.Java;
 import org.hsqldb_voltpatches.HSQLInterface;
 import org.hsqldb_voltpatches.VoltXMLElement;
 import org.voltcore.TransactionIdManager;
@@ -47,12 +48,14 @@ import org.voltdb.ProcedurePartitionData;
 import org.voltdb.RealVoltDB;
 import org.voltdb.SQLStmt;
 import org.voltdb.VoltDB;
+import org.voltdb.JavaProtectedTry;
 import org.voltdb.VoltDBInterface;
 import org.voltdb.VoltNonTransactionalProcedure;
 import org.voltdb.catalog.Catalog;
 import org.voltdb.catalog.CatalogMap;
 import org.voltdb.catalog.Cluster;
 import org.voltdb.catalog.Column;
+import org.voltdb.catalog.ConnectorTableInfo;
 import org.voltdb.catalog.Database;
 import org.voltdb.catalog.Deployment;
 import org.voltdb.catalog.FilteredCatalogDiffEngine;
@@ -65,6 +68,7 @@ import org.voltdb.compilereport.ProcedureAnnotation;
 import org.voltdb.compilereport.ReportMaker;
 import org.voltdb.parser.SQLParser;
 import org.voltdb.planner.ParameterizationInfo;
+import org.voltdb.planner.PlanningErrorException;
 import org.voltdb.planner.StatementPartitioning;
 import org.voltdb.settings.ClusterSettings;
 import org.voltdb.sysprocs.org.voltdb.calciteutils.CreateTableUtils;
@@ -194,7 +198,7 @@ import com.google_voltpatches.common.collect.ImmutableList;
  */
 public class VoltCompiler {
     /** Represents the level of severity for a Feedback message generated during compiling. */
-    public static enum Severity { INFORMATIONAL, WARNING, ERROR, UNEXPECTED }
+    public enum Severity { INFORMATIONAL, WARNING, ERROR, UNEXPECTED }
     public static final int NO_LINE_NUMBER = -1;
     private static final String NO_FILENAME = "null";
 
@@ -214,9 +218,9 @@ public class VoltCompiler {
     private final Map<String, Statement> m_previousCatalogStmts = new HashMap<>();
 
     // feedback by filename
-    ArrayList<Feedback> m_infos = new ArrayList<>();
-    ArrayList<Feedback> m_warnings = new ArrayList<>();
-    ArrayList<Feedback> m_errors = new ArrayList<>();
+    List<Feedback> m_infos = new ArrayList<>();
+    List<Feedback> m_warnings = new ArrayList<>();
+    List<Feedback> m_errors = new ArrayList<>();
 
     // Name of DDL file built by the DDL VoltCompiler from the catalog and added to the jar.
     public static final String AUTOGEN_DDL_FILE_NAME = "autogen-ddl.sql";
@@ -230,10 +234,10 @@ public class VoltCompiler {
     /// set breakpoints and step through a do-over of only the flawed catalogs.
     public static boolean RETRY_FAILED_CATALOG_REBUILD_UNDER_DEBUG = false;
 
-    String m_projectFileURL = null;
+    private String m_projectFileURL = null;
     private String m_currentFilename = NO_FILENAME;
-    Map<String, String> m_ddlFilePaths = new HashMap<>();
-    String[] m_addedClasses = null;
+    private final Map<String, String> m_ddlFilePaths = new HashMap<>();
+    private String[] m_addedClasses = null;
 
     // generated html text for catalog report
     String m_reportPath = null;
@@ -247,8 +251,10 @@ public class VoltCompiler {
     private static VoltLogger compilerLog = new VoltLogger("COMPILER");
     private static final VoltLogger consoleLog = new VoltLogger("CONSOLE");
     private static final VoltLogger Log = new VoltLogger("org.voltdb.compiler.VoltCompiler");
-
-    private final static String m_emptyDDLComment = "-- This DDL file is a placeholder for starting without a user-supplied catalog.\n";
+    private static final JavaProtectedTry<VoltCompilerException> PROTECTED_TRY = new JavaProtectedTry<>();
+    private static final VoltDBInterface VOLTDB = VoltDB.instance();
+    private static final String m_emptyDDLComment =
+            "-- This DDL file is a placeholder for starting without a user-supplied catalog.\n";
 
     private ClassLoader m_classLoader = ClassLoader.getSystemClassLoader();
 
@@ -268,10 +274,10 @@ public class VoltCompiler {
      *
      */
     public static class Feedback {
-        Severity severityLevel;
-        String fileName;
-        int lineNo;
-        String message;
+        private final Severity severityLevel;
+        private final String fileName;
+        private final int lineNo;
+        private final String message;
 
         Feedback(final Severity severityLevel, final String message, final String fileName, final int lineNo) {
             this.severityLevel = severityLevel;
@@ -280,7 +286,7 @@ public class VoltCompiler {
             this.lineNo = lineNo;
         }
 
-        public String getStandardFeedbackLine() {
+        String getStandardFeedbackLine() {
             String retval = "";
             if (severityLevel == Severity.INFORMATIONAL)
                 retval = "INFO";
@@ -294,20 +300,15 @@ public class VoltCompiler {
             return retval + " " + getLogString();
         }
 
-        public String getLogString() {
-            String retval = new String();
+        String getLogString() {
+            StringBuilder retval = new StringBuilder();
             if (! fileName.equals(NO_FILENAME)) {
-                retval += "[" + fileName;
+                retval.append("[").append(fileName);
                 if (lineNo != NO_LINE_NUMBER)
-                    retval += ":" + lineNo;
-                retval += "]: ";
+                    retval.append(":").append(lineNo);
+                retval.append("]: ");
             }
-            retval += message;
-            return retval;
-        }
-
-        public Severity getSeverityLevel() {
-            return severityLevel;
+            return retval.append(message).toString();
         }
 
         public String getFileName() {
@@ -342,32 +343,14 @@ public class VoltCompiler {
         }
 
         public VoltCompilerException(String message, Throwable cause) {
-            message += "\n   caused by:\n   " + cause.toString();
-            addErr(message);
-            this.message = message;
-            this.initCause(cause);
+            this.message = message + "\n   caused by:\n   " + cause.toString();
+            addErr(this.message);
+            initCause(cause);
         }
 
         @Override
         public String getMessage() {
             return message;
-        }
-    }
-
-    class VoltXMLErrorHandler implements ErrorHandler {
-        @Override
-        public void error(final SAXParseException exception) throws SAXException {
-            addErr(exception.getMessage(), exception.getLineNumber());
-        }
-
-        @Override
-        public void fatalError(final SAXParseException exception) throws SAXException {
-            //addErr(exception.getMessage(), exception.getLineNumber());
-        }
-
-        @Override
-        public void warning(final SAXParseException exception) throws SAXException {
-            addWarn(exception.getMessage(), exception.getLineNumber());
         }
     }
 
@@ -443,11 +426,11 @@ public class VoltCompiler {
     }
 
     public boolean hasErrors() {
-        return m_errors.size() > 0;
+        return ! m_errors.isEmpty();
     }
 
     public boolean hasErrorsOrWarnings() {
-        return (m_warnings.size() > 0) || hasErrors();
+        return ! m_warnings.isEmpty() || hasErrors();
     }
 
     public void addInfo(final String msg) {
@@ -498,78 +481,75 @@ public class VoltCompiler {
      * @throws VoltCompilerException
      */
     public boolean compileFromDDL(final String jarOutputPath, final String... ddlFilePaths) {
-        if (ddlFilePaths.length == 0) {
-            compilerLog.error("At least one DDL file is required.");
-            return false;
-        }
-        List<VoltCompilerReader> ddlReaderList;
-        try {
-            ddlReaderList = DDLPathsToReaderList(ddlFilePaths);
-        }
-        catch (VoltCompilerException e) {
-            compilerLog.error("Unable to open DDL file.", e);
-            return false;
-        }
-        // NOTE/TODO: this is not from AdHoc code path, that does not update CalciteSchema for catalog updates.
-        return compileInternalToFile(jarOutputPath, null, null, ddlReaderList, null);
+        return PROTECTED_TRY.safeTryWith(
+                () -> {
+                    if (ddlFilePaths.length == 0) {
+                        compilerLog.error("At least one DDL file is required.");
+                        return false;
+                    } else {
+                        return compileInternalToFile(jarOutputPath, null, null,
+                                DDLPathsToReaderList(ddlFilePaths), null);
+                    }
+                },
+                e -> {
+                    compilerLog.error("Unable to open DDL file.", e);
+                    return false;
+                });
     }
 
     /** Compiles a catalog from a user provided schema and (optional) jar file. */
     public boolean compileFromSchemaAndClasses(
-            final File schemaPath,
-            final File classesJarPath,
-            final File catalogOutputPath)
-    {
+            final File schemaPath, final File classesJarPath, final File catalogOutputPath) {
         if (schemaPath != null && !schemaPath.exists()) {
             compilerLog.error("Cannot compile nonexistent or missing schema.");
             return false;
         }
 
-        List<VoltCompilerReader> ddlReaderList;
+        final List<VoltCompilerReader> ddlReaderList;
         try {
             if (schemaPath == null) {
-                ddlReaderList = new ArrayList<>(1);
-                ddlReaderList.add(new VoltCompilerStringReader(AUTOGEN_DDL_FILE_NAME, m_emptyDDLComment));
+                ddlReaderList = Collections.singletonList(
+                        new VoltCompilerStringReader(AUTOGEN_DDL_FILE_NAME, m_emptyDDLComment));
             } else {
                 ddlReaderList = DDLPathsToReaderList(schemaPath.getAbsolutePath());
             }
-        }
-        catch (VoltCompilerException e) {
+        } catch (VoltCompilerException e) {
             compilerLog.error("Unable to open schema file \"" + schemaPath + "\"", e);
             return false;
         }
 
-        InMemoryJarfile inMemoryUserJar = null;
         ClassLoader originalClassLoader = m_classLoader;
-        try {
-            if (classesJarPath != null && classesJarPath.exists()) {
-                // Make user's classes available to the compiler and add all VoltDB artifacts to theirs (overwriting any existing VoltDB artifacts).
-                // This keeps all their resources because stored procedures may depend on them.
-                inMemoryUserJar = new InMemoryJarfile(classesJarPath);
-                m_classLoader = inMemoryUserJar.getLoader();
-            } else {
-                inMemoryUserJar = new InMemoryJarfile();
-            }
-            // NOTE/TODO: this is not from AdHoc code branch. We use the old code path here, and don't update CalciteSchema from VoltDB catalog.
-            if (compileInternal(null, null, ddlReaderList, Collections.emptyList(), inMemoryUserJar) == null) {
-                return false;
-            }
-        } catch (IOException e) {
-            compilerLog.error("Could not load classes from user supplied jar file", e);
-            return false;
-        } finally {
-            m_classLoader = originalClassLoader;
-        }
-
-        try {
-            inMemoryUserJar.writeToFile(catalogOutputPath).run();
-            return true;
-        }
-        catch (final Exception e) {
-            e.printStackTrace();
-            addErr("Error writing catalog jar to disk: " + e.getMessage());
-            return false;
-        }
+        return new JavaProtectedTry<IOException>()
+                .tryWith(
+                        () -> {
+                            final InMemoryJarfile inMemoryUserJar;
+                            if (classesJarPath != null && classesJarPath.exists()) {
+                                // Make user's classes available to the compiler and add all VoltDB artifacts to theirs (overwriting any existing VoltDB artifacts).
+                                // This keeps all their resources because stored procedures may depend on them.
+                                inMemoryUserJar = new InMemoryJarfile(classesJarPath);
+                                m_classLoader = inMemoryUserJar.getLoader();
+                            } else {
+                                inMemoryUserJar = new InMemoryJarfile();
+                            }
+                            // NOTE/TODO: this is not from AdHoc code branch. We use the old code path here, and don't update CalciteSchema from VoltDB catalog.
+                            if (compileInternal(null, null, ddlReaderList, Collections.emptyList(), inMemoryUserJar) == null) {
+                                return false;
+                            } else {
+                                return JavaProtectedTry.genericSafeTryWith(
+                                        () -> {
+                                            inMemoryUserJar.writeToFile(catalogOutputPath).run();
+                                            return true;
+                                        }, e -> {
+                                            e.printStackTrace();
+                                            addErr("Error writing catalog jar to disk: " + e.getMessage());
+                                            return false;
+                                        });
+                            }
+                        },
+                        e -> {
+                            compilerLog.error("Could not load classes from user supplied jar file", e);
+                            return false;
+                        }, () -> m_classLoader = originalClassLoader);
     }
 
     /**
@@ -584,7 +564,6 @@ public class VoltCompiler {
         final File schemaFile = VoltProjectBuilder.writeStringToTempFile(ddl);
         schemaFile.deleteOnExit();
         final String schemaPath = schemaFile.getPath();
-
         return compileFromDDL(jarPath, schemaPath);
     }
 
@@ -594,33 +573,29 @@ public class VoltCompiler {
      * @return true if successful
      */
     public boolean compileEmptyCatalog(final String jarOutputPath) {
-        // Use a special DDL reader to provide the contents.
-        List<VoltCompilerReader> ddlReaderList = new ArrayList<>(1);
-        ddlReaderList.add(new VoltCompilerStringReader("ddl.sql", m_emptyDDLComment));
-        // Seed it with the DDL so that a version upgrade hack in compileInternalToFile()
-        // doesn't try to get the DDL file from the path.
-        InMemoryJarfile jarFile = new InMemoryJarfile();
-        try {
+        return JavaProtectedTry.genericSafeTryWith(() -> {
+            final InMemoryJarfile jarFile = new InMemoryJarfile();
+            // Use a special DDL reader to provide the contents.
+            final List<VoltCompilerReader> ddlReaderList = Collections.singletonList(
+                    new VoltCompilerStringReader("ddl.sql", m_emptyDDLComment));
+            // Seed it with the DDL so that a version upgrade hack in compileInternalToFile()
+            // doesn't try to get the DDL file from the path.
             ddlReaderList.get(0).putInJar(jarFile, "ddl.sql");
-        }
-        catch (IOException e) {
+            return compileInternalToFile(jarOutputPath, null, null, ddlReaderList, jarFile);
+        }, e -> {
             compilerLog.error("Failed to add DDL file to empty in-memory jar.");
             return false;
-        }
-        // NOTE/TODO: this is not from AdHoc code branch. We use the old code path here, and don't update CalciteSchema from VoltDB catalog.
-        return compileInternalToFile(jarOutputPath, null, null, ddlReaderList, jarFile);
+        });
     }
 
     private static void addBuildInfo(final InMemoryJarfile jarOutput) {
-        StringBuilder buildinfo = new StringBuilder();
-        String info[] = RealVoltDB.extractBuildInfo(compilerLog);
-        buildinfo.append(info[0]).append('\n');
-        buildinfo.append(info[1]).append('\n');
-        buildinfo.append(System.getProperty("user.name")).append('\n');
-        buildinfo.append(System.getProperty("user.dir")).append('\n');
-        buildinfo.append(Long.toString(System.currentTimeMillis())).append('\n');
-
-        byte buildinfoBytes[] = buildinfo.toString().getBytes(Constants.UTF8ENCODING);
+        final String info[] = RealVoltDB.extractBuildInfo(compilerLog);
+        final byte buildinfoBytes[] = new StringBuilder(info[0]).append('\n')
+                .append(info[1]).append('\n')
+                .append(System.getProperty("user.name")).append('\n')
+                .append(System.getProperty("user.dir")).append('\n')
+                .append(System.currentTimeMillis()).append('\n')
+                .toString().getBytes(Constants.UTF8ENCODING);
         jarOutput.put(CatalogUtil.CATALOG_BUILDINFO_FILENAME, buildinfoBytes);
     }
 
@@ -629,16 +604,15 @@ public class VoltCompiler {
      * The generated catalog is diffed with the original catalog to verify compilation and
      * catalog generation consistency.
      */
-    private void debugVerifyCatalog(InMemoryJarfile origJarFile, List<SqlNode> sqlNodes, Catalog origCatalog)
-    {
+    private void debugVerifyCatalog(InMemoryJarfile origJarFile, List<SqlNode> sqlNodes, Catalog origCatalog) {
         final VoltCompiler autoGenCompiler = new VoltCompiler(m_isXDCR);
         // Make the new compiler use the original jarfile's classloader so it can
         // pull in the class files for procedures and imports
         autoGenCompiler.m_classLoader = origJarFile.getLoader();
-        List<VoltCompilerReader> autogenReaderList = new ArrayList<>(1);
-        autogenReaderList.add(new VoltCompilerJarFileReader(origJarFile, AUTOGEN_DDL_FILE_NAME));
-        InMemoryJarfile autoGenJarOutput = new InMemoryJarfile();
         autoGenCompiler.m_currentFilename = AUTOGEN_DDL_FILE_NAME;
+        final List<VoltCompilerReader> autogenReaderList =
+                Collections.singletonList(new VoltCompilerJarFileReader(origJarFile, AUTOGEN_DDL_FILE_NAME));
+        final InMemoryJarfile autoGenJarOutput = new InMemoryJarfile();
         // This call is purposely replicated in retryFailedCatalogRebuildUnderDebug,
         // where it provides an opportunity to set a breakpoint on a do-over when this
         // mainline call produces a flawed catalog that fails the catalog diff.
@@ -647,35 +621,31 @@ public class VoltCompiler {
                 autogenReaderList, sqlNodes, autoGenJarOutput);
         if (autoGenCatalog == null) {
             Log.info("Did not verify catalog because it could not be compiled.");
-            return;
-        }
-
-        FilteredCatalogDiffEngine diffEng =
-                new FilteredCatalogDiffEngine(origCatalog, autoGenCatalog, false);
-        String diffCmds = diffEng.commands();
-        if (diffCmds != null && !diffCmds.equals("")) {
+        } else if (new FilteredCatalogDiffEngine(origCatalog, autoGenCatalog, false).commands().isEmpty()) {
+            Log.info("Catalog verification completed successfuly.");
+        } else {
             // This retry is disabled by default to avoid confusing the unwary developer
             // with a "pointless" replay of an apparently flawed catalog rebuild.
             // Enable it via this flag to provide a chance to set an early breakpoint
             // that is only triggered in hopeless cases.
+            final String suggestRetry;
             if (RETRY_FAILED_CATALOG_REBUILD_UNDER_DEBUG) {
                 autoGenCatalog = replayFailedCatalogRebuildUnderDebug(
                         autoGenCompiler, autogenReaderList,
                         autoGenJarOutput);
+                suggestRetry = "";
+            } else {
+                suggestRetry = " setting VoltCompiler.RETRY_FAILED_CATALOG_REBUILD_UNDER_DEBUG = true and";
             }
             // Re-run a failed diff more verbosely as a pre-crash test diagnostic.
-            diffEng = new FilteredCatalogDiffEngine(origCatalog, autoGenCatalog, true);
-            diffCmds = diffEng.commands();
-            String crashAdvice = "Catalog Verification from Generated DDL failed! " +
-                    "VoltDB dev: Consider" +
-                    (RETRY_FAILED_CATALOG_REBUILD_UNDER_DEBUG ? "" :
-                        " setting VoltCompiler.RETRY_FAILED_CATALOG_REBUILD_UNDER_DEBUG = true and") +
-                    " setting a breakpoint in VoltCompiler.replayFailedCatalogRebuildUnderDebug" +
-                    " to debug a replay of the faulty catalog rebuild roundtrip. ";
-            VoltDB.crashLocalVoltDB(crashAdvice + "The offending diffcmds were: " + diffCmds);
-        }
-        else {
-            Log.info("Catalog verification completed successfuly.");
+            VoltDB.crashLocalVoltDB(
+                    "Catalog Verification from Generated DDL failed! " +
+                            "VoltDB dev: Consider" +
+                            suggestRetry +
+                            " setting a breakpoint in VoltCompiler.replayFailedCatalogRebuildUnderDebug" +
+                            " to debug a replay of the faulty catalog rebuild roundtrip. " +
+                            "The offending diffcmds were: " +
+                            new FilteredCatalogDiffEngine(origCatalog, autoGenCatalog, true).commands());
         }
     }
 
@@ -685,28 +655,26 @@ public class VoltCompiler {
      *  Keep the two calls in synch and only redirect through this function
      *  in the post-mortem replay after the other call created a flawed catalog.
      */
-    private Catalog replayFailedCatalogRebuildUnderDebug(
+    private static Catalog replayFailedCatalogRebuildUnderDebug(
             VoltCompiler autoGenCompiler,
             List<VoltCompilerReader> autogenReaderList,
-            InMemoryJarfile autoGenJarOutput)
-    {
+            InMemoryJarfile autoGenJarOutput) {
         // Be sure to set RETRY_FAILED_CATALOG_REBUILD_UNDER_DEBUG = true to enable
         // this last ditch retry before crashing.
         // BREAKPOINT HERE!
         // Then step IN to debug the failed rebuild -- or, just as likely, the canonical ddl.
         // Or step OVER to debug just the catalog diff process, retried with verbose output --
         // maybe it's just being too sensitive to immaterial changes?
-        Catalog autoGenCatalog = autoGenCompiler.compileCatalogInternal(null, null,
+        return autoGenCompiler.compileCatalogInternal(null, null,
                 autogenReaderList, Collections.emptyList(), autoGenJarOutput);
-        return autoGenCatalog;
     }
 
     /**
      * Internal method for compiling with and without a project.xml file or DDL files.
      *
-     * @param projectReader Reader for project file or null if a project file is not used.
      * @param jarOutputPath The location to put the finished JAR to.
-     * @param ddlFilePaths The list of DDL files to compile (when no project is provided).
+     * @param cannonicalDDLIfAny ??
+     * @param ddlReaderList ??
      * @param jarOutputRet The in-memory jar to populate or null if the caller doesn't provide one.
      * @return true if successful
      */
@@ -715,50 +683,51 @@ public class VoltCompiler {
             final VoltCompilerReader cannonicalDDLIfAny,
             final Catalog previousCatalogIfAny,
             final List<VoltCompilerReader> ddlReaderList,
-            final InMemoryJarfile jarOutputRet)
-    {
+            final InMemoryJarfile jarOutputRet) {
         if (jarOutputPath == null) {
             addErr("The output jar path is null.");
             return false;
+        } else {
+            // NOTE/TODO: All the callers of this is not from AdHoc code branch. We use the old code path here, and don't update CalciteSchema from VoltDB catalog.
+            InMemoryJarfile jarOutput = compileInternal(cannonicalDDLIfAny, previousCatalogIfAny, ddlReaderList, Collections.emptyList(), jarOutputRet);
+            if (jarOutput == null) {
+                return false;
+            } else {
+                return JavaProtectedTry.genericSafeTryWith(() -> {
+                    jarOutput.writeToFile(new File(jarOutputPath)).run();
+                    return true;
+                }, e -> {
+                    e.printStackTrace();
+                    addErr("Error writing catalog jar to disk: " + e.getMessage());
+                    return false;
+                });
+            }
         }
-
-        // NOTE/TODO: All the callers of this is not from AdHoc code branch. We use the old code path here, and don't update CalciteSchema from VoltDB catalog.
-        InMemoryJarfile jarOutput = compileInternal(cannonicalDDLIfAny, previousCatalogIfAny, ddlReaderList, Collections.emptyList(), jarOutputRet);
-        if (jarOutput == null) {
-            return false;
-        }
-
-        try {
-            jarOutput.writeToFile(new File(jarOutputPath)).run();
-        }
-        catch (final Exception e) {
-            e.printStackTrace();
-            addErr("Error writing catalog jar to disk: " + e.getMessage());
-            return false;
-        }
-
-        return true;
     }
 
-    private static void generateCatalogReport(Catalog catalog, String ddl, boolean standaloneCompiler,
-            ArrayList<Feedback> warnings, InMemoryJarfile jarOutput) throws IOException {
-        VoltDBInterface voltdb = VoltDB.instance();
+    private static void generateCatalogReport(Catalog catalog, String ddl,
+            List<Feedback> warnings, InMemoryJarfile jarOutput) throws IOException {
         // try to get a catalog context
-        CatalogContext catalogContext = voltdb != null ? voltdb.getCatalogContext() : null;
-        ClusterSettings clusterSettings = catalogContext != null ? catalogContext.getClusterSettings() : null;
-        int tableCount = catalogContext != null ? catalogContext.tables.size() : 0;
-        Deployment deployment = catalogContext != null ? catalogContext.cluster.getDeployment().get("deployment") : null;
-        int hostcount = clusterSettings != null ? clusterSettings.hostcount() : 1;
-        int kfactor = deployment != null ? deployment.getKfactor() : 0;
-        int sitesPerHost = 8;
-        if  (voltdb != null && voltdb.getCatalogContext() != null) {
-            sitesPerHost =  voltdb.getCatalogContext().getNodeSettings().getLocalSitesCount();
+        final int tableCount, hostcount, kfactor, sitesPerHost;
+        if (VOLTDB == null) {
+            tableCount = 0;
+            hostcount = 1;
+            kfactor = 0;
+            sitesPerHost = 8;
+        } else {
+            final CatalogContext catalogContext = VOLTDB.getCatalogContext();
+            assert catalogContext != null;
+            final ClusterSettings clusterSettings = catalogContext.getClusterSettings();
+            final Deployment deployment = catalogContext.cluster.getDeployment().get("deployment");
+            assert deployment != null : "deployment is NULL";
+            tableCount = catalogContext.tables.size();
+            hostcount = clusterSettings.hostcount();
+            kfactor = deployment.getKfactor();
+            sitesPerHost = catalogContext.getNodeSettings().getLocalSitesCount();
         }
-        boolean isPro = MiscUtils.isPro();
-        long minHeapRqt = RealVoltDB.computeMinimumHeapRqt(tableCount, sitesPerHost, kfactor);
-
-        String report = ReportMaker.report(catalog, minHeapRqt, isPro, hostcount, sitesPerHost, kfactor,
-                warnings, ddl);
+        final boolean isPro = MiscUtils.isPro();
+        final long minHeapRqt = RealVoltDB.computeMinimumHeapRqt(tableCount, sitesPerHost, kfactor);
+        final String report = ReportMaker.report(catalog, minHeapRqt, isPro, hostcount, sitesPerHost, kfactor, warnings, ddl);
         // put the compiler report into the jarfile
         jarOutput.put(CATLOG_REPORT, report.getBytes(Constants.UTF8ENCODING));
     }
@@ -780,16 +749,13 @@ public class VoltCompiler {
             final Catalog previousCatalogIfAny,
             final List<VoltCompilerReader> ddlReaderList,
             final List<SqlNode> sqlNodes,
-            final InMemoryJarfile jarOutputRet)
-    {
+            final InMemoryJarfile jarOutputRet) {
         // Expect to have either >1 ddl file or a project file.
         assert(ddlReaderList.size() > 0);
         // Make a temporary local output jar if one wasn't provided.
-        final InMemoryJarfile jarOutput = (jarOutputRet != null
-                                                ? jarOutputRet
-                                                : new InMemoryJarfile());
+        final InMemoryJarfile jarOutput = (jarOutputRet != null ? jarOutputRet : new InMemoryJarfile());
 
-        if (ddlReaderList == null || ddlReaderList.isEmpty()) {
+        if (ddlReaderList.isEmpty()) {
             addErr("One or more DDL files are required.");
             return null;
         }
@@ -815,7 +781,7 @@ public class VoltCompiler {
 
         // generate the catalog report and write it to disk
         try {
-            generateCatalogReport(m_catalog, ddlWithBatchSupport, standaloneCompiler, m_warnings, jarOutput);
+            generateCatalogReport(m_catalog, ddlWithBatchSupport, m_warnings, jarOutput);
         }
         catch (IOException e) {
             e.printStackTrace();
@@ -826,75 +792,60 @@ public class VoltCompiler {
         if (DEBUG_VERIFY_CATALOG) {
             debugVerifyCatalog(jarOutput, sqlNodes, catalog);
         }
-
-        // WRITE CATALOG TO JAR HERE
-        final String catalogCommands = catalog.serialize();
-
-        byte[] catalogBytes = catalogCommands.getBytes(Constants.UTF8ENCODING);
-
-        try {
-            // Don't update buildinfo if it's already present, e.g. while upgrading.
-            // Note when upgrading the version has already been updated by the caller.
-            if (!jarOutput.containsKey(CatalogUtil.CATALOG_BUILDINFO_FILENAME)) {
-                addBuildInfo(jarOutput);
-            }
-            jarOutput.put(CatalogUtil.CATALOG_FILENAME, catalogBytes);
-        }
-        catch (final Exception e) {
-            e.printStackTrace();
-            return null;
-        }
-
-        assert(!hasErrors());
-
-        if (hasErrors()) {
-            return null;
-        }
-
-        return jarOutput;
+        return JavaProtectedTry.genericSafeTryWith(
+                () -> {
+                    // Don't update buildinfo if it's already present, e.g. while upgrading.
+                    // Note when upgrading the version has already been updated by the caller.
+                    if (!jarOutput.containsKey(CatalogUtil.CATALOG_BUILDINFO_FILENAME)) {
+                        addBuildInfo(jarOutput);
+                    }
+                    jarOutput.put(CatalogUtil.CATALOG_FILENAME, catalog.serialize().getBytes(Constants.UTF8ENCODING));
+                    if (hasErrors()) {
+                        throw new PlanningErrorException("Error generated");
+                    } else {
+                        return jarOutput;
+                    }
+                }, e -> {
+                    e.printStackTrace();
+                    return null;
+                });
     }
 
     /**
      * Get textual explain plan info for each plan from the
      * catalog to be shoved into the catalog jarfile.
      */
-    HashMap<String, byte[]> getExplainPlans(Catalog catalog) {
-        HashMap<String, byte[]> retval = new HashMap<>();
-        Database db = getCatalogDatabase(m_catalog);
+    Map<String, byte[]> getExplainPlans(Catalog catalog) {
+        Database db = getCatalogDatabase(catalog);
         assert(db != null);
-        for (Procedure proc : db.getProcedures()) {
-            for (Statement stmt : proc.getStatements()) {
-                String s = "SQL: " + stmt.getSqltext() + "\n";
-                s += "COST: " + Integer.toString(stmt.getCost()) + "\n";
-                s += "PLAN:\n\n";
-                s += Encoder.hexDecodeToString(stmt.getExplainplan()) + "\n";
-                byte[] b = s.getBytes(Constants.UTF8ENCODING);
-                retval.put(proc.getTypeName() + "_" + stmt.getTypeName() + ".txt", b);
+        return new HashMap<String, byte[]>() {{
+            for (Procedure proc : db.getProcedures()) {
+                for (Statement stmt : proc.getStatements()) {
+                    put(proc.getTypeName() + "_" + stmt.getTypeName() + ".txt",
+                            new StringBuilder("SQL: ").append(stmt.getSqltext())
+                                    .append("\nCost: ").append(stmt.getCost())
+                                    .append("\nPLAN:\n\n")
+                                    .append(Encoder.hexDecodeToString(stmt.getExplainplan()))
+                                    .append("\n")
+                                    .toString().getBytes(Constants.UTF8ENCODING));
+                }
             }
-        }
-        return retval;
+        }};
     }
 
-    private VoltCompilerFileReader createDDLFileReader(String path)
-            throws VoltCompilerException
-    {
-        try {
-            return new VoltCompilerFileReader(VoltCompilerFileReader.getSchemaPath(m_projectFileURL, path));
-        }
-        catch (IOException e) {
-            String msg = String.format("Unable to open schema file \"%s\" for reading: %s", path, e.getMessage());
-            throw new VoltCompilerException(msg);
-        }
+    private VoltCompilerFileReader createDDLFileReader(String path) throws VoltCompilerException {
+        return PROTECTED_TRY.failableGet(
+                () -> new VoltCompilerFileReader(VoltCompilerFileReader.getSchemaPath(m_projectFileURL, path)),
+                e -> new VoltCompilerException(String.format(
+                        "Unable to open schema file \"%s\" for reading: %s", path, e.getMessage())));
     }
 
-    private List<VoltCompilerReader> DDLPathsToReaderList(final String... ddlFilePaths)
-            throws VoltCompilerException
-    {
-        List<VoltCompilerReader> ddlReaderList = new ArrayList<>(ddlFilePaths.length);
-        for (int i = 0; i < ddlFilePaths.length; ++i) {
-            ddlReaderList.add(createDDLFileReader(ddlFilePaths[i]));
-        }
-        return ddlReaderList;
+    private List<VoltCompilerReader> DDLPathsToReaderList(final String... ddlFilePaths) throws VoltCompilerException {
+        return new ArrayList<VoltCompilerReader>() {{
+            for (int i = 0; i < ddlFilePaths.length; ++i) {
+                add(createDDLFileReader(ddlFilePaths[i]));
+            }
+        }};
     }
 
     /**
@@ -903,12 +854,10 @@ public class VoltCompiler {
      * @return  compiled catalog
      * @throws VoltCompilerException
      */
-    public Catalog compileCatalogFromDDL(final String... ddlFilePaths)
-            throws VoltCompilerException
-    {
-        InMemoryJarfile jarOutput = new InMemoryJarfile();
+    public Catalog compileCatalogFromDDL(final String... ddlFilePaths) throws VoltCompilerException {
         // NOTE/TODO: this is not from AdHoc code branch. We use the old code path here, and don't update CalciteSchema from VoltDB catalog.
-        return compileCatalogInternal(null, null, DDLPathsToReaderList(ddlFilePaths), Collections.emptyList(), jarOutput);
+        return compileCatalogInternal(null, null,
+                DDLPathsToReaderList(ddlFilePaths), Collections.emptyList(), new InMemoryJarfile());
     }
 
     /**
@@ -926,37 +875,28 @@ public class VoltCompiler {
             final Catalog previousCatalogIfAny,
             final List<VoltCompilerReader> ddlReaderList,
             final List<SqlNode> sqlNodes,
-            final InMemoryJarfile jarOutput)
-    {
+            final InMemoryJarfile jarOutput) {
         m_catalog = new Catalog();
         // Initialize the catalog for one cluster
         m_catalog.execute("add / clusters cluster");
         m_catalog.getClusters().get("cluster").setSecurityenabled(false);
-
-        // shutdown and make a new hsqldb
-        try {
+        return PROTECTED_TRY.safeTryWith(() -> {
+            // shutdown and make a new hsqldb
             Database previousDBIfAny = null;
             if (previousCatalogIfAny != null) {
                 previousDBIfAny = previousCatalogIfAny.getClusters().get("cluster").getDatabases().get("database");
             }
             compileDatabaseNode(cannonicalDDLIfAny, previousDBIfAny, ddlReaderList, sqlNodes, jarOutput);
-        } catch (final VoltCompilerException e) {
-            return null;
-        }
-
-        assert(m_catalog != null);
-
-        // add epoch info to catalog
-        final int epoch = (int)(TransactionIdManager.getEpoch() / 1000);
-        m_catalog.getClusters().get("cluster").setLocalepoch(epoch);
-
-        return m_catalog;
+            assert(m_catalog != null);
+            // add epoch info to catalog
+            final int epoch = (int)(TransactionIdManager.getEpoch() / 1000);
+            m_catalog.getClusters().get("cluster").setLocalepoch(epoch);
+            return m_catalog;
+        }, e -> null);
     }
 
     public String getCanonicalDDL() {
-        if(m_canonicalDDL == null) {
-            throw new RuntimeException();
-        }
+        assert m_canonicalDDL != null : "m_canonicalDDL is NULL";
         return m_canonicalDDL;
     }
 
@@ -988,8 +928,7 @@ public class VoltCompiler {
      * IF YOU ADD A THIRD ROLE TO THE DEFAULTS, IT'S TIME TO BUST THEM OUT INTO A CENTRAL
      * LOCALE AND DO ALL THIS MAGIC PROGRAMATICALLY --izzy 11/20/2014
      */
-    private static void addDefaultRoles(Catalog catalog)
-    {
+    private static void addDefaultRoles(Catalog catalog) {
         // admin
         catalog.execute("add /clusters#cluster/databases#database groups administrator");
         Permission.setPermissionsInGroup(getCatalogDatabase(catalog).getGroups().get("administrator"),
@@ -1001,8 +940,7 @@ public class VoltCompiler {
                                          Permission.getPermissionsFromAliases(Arrays.asList("SQL", "ALLPROC")));
     }
 
-    public static enum DdlProceduresToLoad
-    {
+    public enum DdlProceduresToLoad {
         NO_DDL_PROCEDURES, ONLY_SINGLE_STATEMENT_PROCEDURES, ALL_DDL_PROCEDURES
     }
 
@@ -1017,10 +955,8 @@ public class VoltCompiler {
      * @param ddlFilePaths schema file paths
      * @throws VoltCompilerException
      */
-    public Catalog loadSchema(HSQLInterface hsql,
-                              DdlProceduresToLoad whichProcs,
-                              String... ddlFilePaths) throws VoltCompilerException
-    {
+    public Catalog loadSchema(HSQLInterface hsql, DdlProceduresToLoad whichProcs,
+                              String... ddlFilePaths) throws VoltCompilerException {
         m_catalog = new Catalog(); //
         m_catalog.execute("add / clusters cluster");
         Database db = initCatalogDatabase(m_catalog);
@@ -1029,7 +965,6 @@ public class VoltCompiler {
         InMemoryJarfile jarOutput = new InMemoryJarfile();
         // NOTE/TODO: this is not from AdHoc code branch. We use the old code path here, and don't update CalciteSchema from VoltDB catalog.
         compileDatabase(db, hsql, voltDdlTracker, null, null, ddlReaderList, Collections.emptyList(), null, whichProcs, jarOutput);
-
         return m_catalog;
     }
 
@@ -1042,22 +977,14 @@ public class VoltCompiler {
      * @throws VoltCompilerException
      */
     private void compileDatabaseNode(
-            VoltCompilerReader cannonicalDDLIfAny,
-            Database previousDBIfAny,
-            final List<VoltCompilerReader> ddlReaderList,
-            final List<SqlNode> sqlNodes,
-            final InMemoryJarfile jarOutput)
-                    throws VoltCompilerException
-    {
-        final ArrayList<Class<?>> classDependencies = new ArrayList<>();
-        final VoltDDLElementTracker voltDdlTracker = new VoltDDLElementTracker(this);
-
-        Database db = initCatalogDatabase(m_catalog);
-
-        // shutdown and make a new hsqldb <-- NOTE
-        HSQLInterface hsql = HSQLInterface.loadHsqldb(ParameterizationInfo.getParamStateManager());
-        compileDatabase(db, hsql, voltDdlTracker, cannonicalDDLIfAny, previousDBIfAny, ddlReaderList, sqlNodes, classDependencies,
-                        DdlProceduresToLoad.ALL_DDL_PROCEDURES, jarOutput);
+            VoltCompilerReader cannonicalDDLIfAny, Database previousDBIfAny,
+            final List<VoltCompilerReader> ddlReaderList, final List<SqlNode> sqlNodes,
+            final InMemoryJarfile jarOutput) throws VoltCompilerException {
+        compileDatabase(initCatalogDatabase(m_catalog), // shutdown and make a new hsqldb
+                HSQLInterface.loadHsqldb(ParameterizationInfo.getParamStateManager()),
+                new VoltDDLElementTracker(this),
+                cannonicalDDLIfAny, previousDBIfAny, ddlReaderList, sqlNodes, new ArrayList<>(),
+                DdlProceduresToLoad.ALL_DDL_PROCEDURES, jarOutput);
     }
 
     /**
@@ -1074,18 +1001,10 @@ public class VoltCompiler {
      * @param jarOutput The in-memory jar to populate or null if the caller doesn't provide one.
      */
     private void compileDatabase(
-            Database db,
-            HSQLInterface hsql,
-            VoltDDLElementTracker voltDdlTracker,
-            VoltCompilerReader cannonicalDDLIfAny,
-            Database previousDBIfAny,
-            List<VoltCompilerReader> schemaReaders,
-            List<SqlNode> sqlNodes,
-            Collection<Class<?>> classDependencies,
-            DdlProceduresToLoad whichProcs,
-            InMemoryJarfile jarOutput)
-                    throws VoltCompilerException
-    {
+            Database db, HSQLInterface hsql, VoltDDLElementTracker voltDdlTracker, VoltCompilerReader cannonicalDDLIfAny,
+            Database previousDBIfAny, List<VoltCompilerReader> schemaReaders, List<SqlNode> sqlNodes,
+            Collection<Class<?>> classDependencies, DdlProceduresToLoad whichProcs,
+            InMemoryJarfile jarOutput) throws VoltCompilerException {
         // Actually parse and handle all the DDL
         // DDLCompiler also provides partition descriptors for DDL PARTITION
         // and REPLICATE statements.
@@ -1106,29 +1025,26 @@ public class VoltCompiler {
                 m_ddlFilePaths.put(cannonicalDDLIfAny.getName(), cannonicalDDLIfAny.getPath());
                 ddlcompiler.loadSchema(cannonicalDDLIfAny, db, whichProcs);
             }
-
             m_dirtyTables.clear();
 
             for (final VoltCompilerReader schemaReader : schemaReaders) {
-                String origFilename = m_currentFilename;
-                try {
-                    if (m_currentFilename.equals(NO_FILENAME))
-                        m_currentFilename = schemaReader.getName();
+                String origFilename = m_currentFilename;        // TODO: having to set it back is where lots of headache comes from
+                PROTECTED_TRY.tryWith(
+                        () -> {
+                            if (m_currentFilename.equals(NO_FILENAME))
+                                m_currentFilename = schemaReader.getName();
 
-                    // add the file object's path to the list of files for the jar
-                    m_ddlFilePaths.put(schemaReader.getName(), schemaReader.getPath());
+                            // add the file object's path to the list of files for the jar
+                            m_ddlFilePaths.put(schemaReader.getName(), schemaReader.getPath());
 
-                    if (m_filterWithSQLCommand) {
-                        SQLParser.FileInfo fi = new SQLParser.FileInfo(schemaReader.getPath());
-                        ddlcompiler.loadSchemaWithFiltering(schemaReader, db, whichProcs, fi);
-                    }
-                    else {
-                        ddlcompiler.loadSchema(schemaReader, db, whichProcs);
-                    }
-                }
-                finally {
-                    m_currentFilename = origFilename;
-                }
+                            if (m_filterWithSQLCommand) {
+                                SQLParser.FileInfo fi = new SQLParser.FileInfo(schemaReader.getPath());
+                                ddlcompiler.loadSchemaWithFiltering(schemaReader, db, whichProcs, fi);
+                            }
+                            else {
+                                ddlcompiler.loadSchema(schemaReader, db, whichProcs);
+                            }
+                        }, () -> m_currentFilename = origFilename);
             }
 
             // When A/A is enabled, create an export table for every DR table to log possible conflicts
@@ -1149,50 +1065,41 @@ public class VoltCompiler {
             // Process DDL exported tables
             NavigableMap<String, NavigableSet<String>> exportTables = voltDdlTracker.getExportedTables();
             for (Entry<String, NavigableSet<String>> e : exportTables.entrySet()) {
-                String targetName = e.getKey();
+                final String targetName = e.getKey();
                 for (String tableName : e.getValue()) {
                     addExportTableToConnector(targetName, tableName, db);
                 }
             }
             ddlcompiler.processMaterializedViewWarnings(db);
-
             // process DRed tables
             for (Entry<String, String> drNode: voltDdlTracker.getDRedTables().entrySet()) {
                 compileDRTable(drNode, db);
             }
 
             if (whichProcs != DdlProceduresToLoad.NO_DDL_PROCEDURES) {
-                Collection<ProcedureDescriptor> allProcs = voltDdlTracker.getProcedureDescriptors();
-                CatalogMap<Procedure> previousProcsIfAny = null;
-                if (previousDBIfAny != null) {
-                    previousProcsIfAny = previousDBIfAny.getProcedures();
-                }
-                compileProcedures(db, hsql, allProcs, classDependencies, whichProcs, previousProcsIfAny, jarOutput);
+                final CatalogMap<Procedure> previousProcs =
+                        previousDBIfAny == null ? null : previousDBIfAny.getProcedures();
+                compileProcedures(db, hsql,
+                        voltDdlTracker.getProcedureDescriptors(), classDependencies,
+                        whichProcs, previousProcs, jarOutput);
             }
-
             // add extra classes from the DDL
             m_addedClasses = voltDdlTracker.m_extraClassses.toArray(new String[0]);
             addExtraClasses(jarOutput);
-
             compileRowLimitDeleteStmts(db, hsql, ddlcompiler.getLimitDeleteStmtToXmlEntries());
-        }
-        catch (Throwable ex) {
+        } catch (Throwable ex) {
             ddlcompiler.restoreSavedFunctions();
             throw ex;
         }
         ddlcompiler.clearSavedFunctions();
     }
 
-    private void compileRowLimitDeleteStmts(
-            Database db,
-            HSQLInterface hsql,
-            Map<Statement, VoltXMLElement> deleteStmtXmlEntries)
+    private void compileRowLimitDeleteStmts(Database db, HSQLInterface hsql,
+                                            Map<Statement, VoltXMLElement> deleteStmtXmlEntries)
             throws VoltCompilerException {
-
         for (Map.Entry<Statement, VoltXMLElement> entry : deleteStmtXmlEntries.entrySet()) {
-            Statement stmt = entry.getKey();
-            VoltXMLElement xml = entry.getValue();
-
+            final Statement stmt = entry.getKey();
+            final VoltXMLElement xml = entry.getValue();
             // choose DeterminismMode.FASTER for determinism, and rely on the planner to error out
             // if we generated a plan that is content-non-deterministic.
             StatementCompiler.compileStatementAndUpdateCatalog(this,
@@ -1212,9 +1119,7 @@ public class VoltCompiler {
      * Once the DDL file is over, take all of the extra classes found and add them to the jar.
      */
     private void addExtraClasses(final InMemoryJarfile jarOutput) throws VoltCompilerException {
-
         List<String> addedClasses = new ArrayList<>();
-
         for (String className : m_addedClasses) {
             /*
              * Only add the class if it isn't already in the output jar.
@@ -1222,19 +1127,15 @@ public class VoltCompiler {
              * catalog version upgrade.
              */
             if (!jarOutput.containsKey(className)) {
-                try {
-                    Class<?> clz = Class.forName(className, true, m_classLoader);
-
-                    if (addClassToJar(jarOutput, clz)) {
+                PROTECTED_TRY.tryWith(() -> {
+                    if (addClassToJar(jarOutput, Class.forName(className, true, m_classLoader))) {
                         addedClasses.add(className);
                     }
-
-                }
-                catch (Exception e) {
+                },  e -> {
                     String msg = "Class %s could not be loaded/found/added to the jar.";
                     msg = String.format(msg, className);
-                    throw new VoltCompilerException(msg);
-                }
+                    return new VoltCompilerException(msg);
+                });
                 // reset the added classes to the actual added classes
             }
         }
@@ -1251,14 +1152,10 @@ public class VoltCompiler {
      * @param jarOutput The in-memory jar to populate or null if the caller doesn't provide one.
      * @throws VoltCompilerException
      */
-    private void compileProcedures(Database db,
-                                   HSQLInterface hsql,
-                                   Collection<ProcedureDescriptor> allProcs,
-                                   Collection<Class<?>> classDependencies,
-                                   DdlProceduresToLoad whichProcs,
-                                   CatalogMap<Procedure> prevProcsIfAny,
-                                   InMemoryJarfile jarOutput) throws VoltCompilerException
-    {
+    private void compileProcedures(
+            Database db, HSQLInterface hsql, Collection<ProcedureDescriptor> allProcs,
+            Collection<Class<?>> classDependencies, DdlProceduresToLoad whichProcs,
+            CatalogMap<Procedure> prevProcsIfAny, InMemoryJarfile jarOutput) throws VoltCompilerException {
         // build a cache of previous SQL stmts
         m_previousCatalogStmts.clear();
         if (prevProcsIfAny != null) {
@@ -1268,7 +1165,6 @@ public class VoltCompiler {
                 }
             }
         }
-
         // Ignore class dependencies if ignoring java stored procs.
         // This extra qualification anticipates some (undesirable) overlap between planner
         // testing and additional library code in the catalog jar file.
@@ -1282,33 +1178,25 @@ public class VoltCompiler {
                 addClassToJar(jarOutput, classDependency);
             }
         }
-
-        final List<ProcedureDescriptor> procedures = new ArrayList<>();
-        procedures.addAll(allProcs);
-
         // Actually parse and handle all the Procedures
-        for (final ProcedureDescriptor procedureDescriptor : procedures) {
+        for (final ProcedureDescriptor procedureDescriptor : allProcs) {
             final String procedureName = procedureDescriptor.m_className;
             if (procedureDescriptor.m_stmtLiterals == null) {
-                m_currentFilename = procedureName.substring(procedureName.lastIndexOf('.') + 1);
-                m_currentFilename += ".class";
-            }
-            else if (whichProcs == DdlProceduresToLoad.ONLY_SINGLE_STATEMENT_PROCEDURES) {
+                m_currentFilename = procedureName.substring(procedureName.lastIndexOf('.') + 1) + ".class";
+            } else if (whichProcs == DdlProceduresToLoad.ONLY_SINGLE_STATEMENT_PROCEDURES) {
                 // In planner test mode, especially within the plannerTester framework,
                 // ignore any java procedures referenced in ddl CREATE PROCEDURE statements to allow
                 // re-use of actual application ddl files without introducing class dependencies.
                 // This potentially allows automatic plannerTester regression test support
                 // for all the single-statement procedures of an unchanged application ddl file.
                 continue;
-            }
-            else {
+            } else {
                 m_currentFilename = procedureName;
             }
             ProcedureCompiler.compile(this, hsql, m_estimates, db, procedureDescriptor, jarOutput);
         }
         // done handling files
         m_currentFilename = NO_FILENAME;
-
         // allow gc to reclaim any cache memory here
         m_previousCatalogStmts.clear();
     }
@@ -1327,18 +1215,16 @@ public class VoltCompiler {
 
     /** Capture plan context info -- statement, cost, high-level "explain". */
     public void captureDiagnosticContext(String planDescription) {
-        if (m_capturedDiagnosticDetail == null) {
-            return;
+        if (m_capturedDiagnosticDetail != null) {
+            m_capturedDiagnosticDetail.add(planDescription);
         }
-        m_capturedDiagnosticDetail.add(planDescription);
     }
 
     /** Capture plan content in terse json format. */
     public void captureDiagnosticJsonFragment(String json) {
-        if (m_capturedDiagnosticDetail == null) {
-            return;
+        if (m_capturedDiagnosticDetail != null) {
+            m_capturedDiagnosticDetail.add(json);
         }
-        m_capturedDiagnosticDetail.add(json);
     }
 
     static void addDatabaseEstimatesInfo(final DatabaseEstimates estimates, final Database db) {
@@ -1353,52 +1239,43 @@ public class VoltCompiler {
     }
 
     void addExportTableToConnector(final String targetName, final String tableName, final Database catdb)
-            throws VoltCompilerException
-    {
+            throws VoltCompilerException {
         assert tableName != null && ! tableName.trim().isEmpty() && catdb != null;
-
         // Catalog Connector
         org.voltdb.catalog.Connector catconn = catdb.getConnectors().getIgnoreCase(targetName);
         if (catconn == null) {
             catconn = catdb.getConnectors().add(targetName);
         }
-        org.voltdb.catalog.Table tableref = catdb.getTables().getIgnoreCase(tableName);
+        Table tableref = catdb.getTables().getIgnoreCase(tableName);
         if (tableref == null) {
             throw new VoltCompilerException("While configuring export, table " + tableName + " was not present in " +
-            "the catalog.");
-        }
-
-        // streams cannot have tuple limits
-        if (tableref.getTuplelimit() != Integer.MAX_VALUE) {
+                    "the catalog.");
+        } else if (tableref.getTuplelimit() != Integer.MAX_VALUE) { // streams cannot have tuple limits
             throw new VoltCompilerException("Streams cannot have row limits configured");
         }
-        Column pc = tableref.getPartitioncolumn();
+        final Column pc = tableref.getPartitioncolumn();
         //Get views
         List<Table> tlist = CatalogUtil.getMaterializeViews(catdb, tableref);
-        if (pc == null && tlist.size() != 0) {
+        if (pc == null && ! tlist.isEmpty()) {
             compilerLog.error("While configuring export, stream " + tableName + " is a source table " +
                     "for a materialized view. Streams support views as long as partitioned column is part of the view.");
             throw new VoltCompilerException("Stream configured with materialized view without partitioned column.");
-        }
-        if (pc != null && pc.getName() != null && tlist.size() != 0) {
+        } else if (pc != null && pc.getName() != null && ! tlist.isEmpty()) {
             for (Table t : tlist) {
                 if (t.getColumns().get(pc.getName()) == null) {
                     compilerLog.error("While configuring export, table " + t + " is a source table " +
                             "for a materialized view. Export only tables support views as long as partitioned column is part of the view.");
                     throw new VoltCompilerException("Stream configured with materialized view without partitioned column in the view.");
-                } else {
-                    //Set partition column of view table to partition column of stream
+                } else { //Set partition column of view table to partition column of stream
                     t.setPartitioncolumn(t.getColumns().get(pc.getName()));
                 }
             }
         }
-        if (tableref.getMaterializer() != null)
-        {
+        if (tableref.getMaterializer() != null) {
             compilerLog.error("While configuring export, " + tableName + " is a " +
-                                        "materialized view.  A view cannot be export source.");
+                    "materialized view.  A view cannot be export source.");
             throw new VoltCompilerException("View configured as export source");
-        }
-        if (tableref.getIndexes().size() > 0) {
+        } else if (tableref.getIndexes().size() > 0) {
             compilerLog.error("While configuring export, stream " + tableName + " has indexes defined. " +
                     "Streams can't have indexes (including primary keys).");
             throw new VoltCompilerException("Streams cannot be configured with indexes");
@@ -1409,39 +1286,25 @@ public class VoltCompiler {
             tableref.setIsreplicated(false);
             tableref.setPartitioncolumn(null);
         }
-        org.voltdb.catalog.ConnectorTableInfo connTableInfo =
-                catconn.getTableinfo().getIgnoreCase(tableName);
-
+        ConnectorTableInfo connTableInfo = catconn.getTableinfo().getIgnoreCase(tableName);
         if (connTableInfo == null) {
             connTableInfo = catconn.getTableinfo().add(tableName);
             connTableInfo.setTable(tableref);
             connTableInfo.setAppendonly(true);
+        } else  {
+            throw new VoltCompilerException(String.format("Table \"%s\" is already exported", tableName));
         }
-        else  {
-            throw new VoltCompilerException(String.format(
-                    "Table \"%s\" is already exported", tableName
-                    ));
-        }
-
     }
 
-    void compileDRTable(final Entry<String, String> drNode, final Database db)
-            throws VoltCompilerException
-    {
-        String tableName = drNode.getKey();
-        String action = drNode.getValue();
-
+    void compileDRTable(final Entry<String, String> drNode, final Database db) throws VoltCompilerException {
+        final String tableName = drNode.getKey();
+        final String action = drNode.getValue();
         org.voltdb.catalog.Table tableref = db.getTables().getIgnoreCase(tableName);
         if (tableref.getMaterializer() != null) {
             throw new VoltCompilerException("While configuring dr, table " + tableName + " is a materialized view." +
                                             " DR does not support materialized view.");
         }
-
-        if (action.equalsIgnoreCase("DISABLE")) {
-            tableref.setIsdred(false);
-        } else {
-            tableref.setIsdred(true);
-        }
+        tableref.setIsdred(! action.equalsIgnoreCase("DISABLE"));
     }
 
     // Usage messages for new and legacy syntax.
@@ -1458,8 +1321,7 @@ public class VoltCompiler {
      *
      * @param args  arguments (see above)
      */
-    public static void main(final String[] args)
-    {
+    public static void main(final String[] args) {
         // passing true to constructor indicates the compiler is being run in standalone mode
         final VoltCompiler compiler = new VoltCompiler(true, false);
 
@@ -1475,18 +1337,15 @@ public class VoltCompiler {
                     System.exit(-1);
                 }
                 success = compiler.compileFromDDL(args[0], ArrayUtils.subarray(args, 1, args.length));
-            }
-            else {
+            } else {
                 System.err.printf("Usage: %s\n", usageNew);
                 System.exit(-1);
             }
-        }
-        else {
+        } else {
             // Can't recognize the arguments or there are no arguments.
             System.err.printf("Usage: %s\n       %s\n", usageNew, usageLegacy);
             System.exit(-1);
         }
-
         // Should have exited if inadequate arguments were provided.
         assert(args.length > 0);
 
@@ -1494,27 +1353,23 @@ public class VoltCompiler {
         if (!success) {
             compiler.summarizeErrors(System.out, null);
             System.exit(-1);
+        } else {
+            compiler.summarizeSuccess(System.out, null, args[0]);
         }
-        compiler.summarizeSuccess(System.out, null, args[0]);
     }
 
     public void summarizeSuccess(PrintStream outputStream, PrintStream feedbackStream, String jarOutputPath) {
         if (outputStream != null) {
-
-            Database database = getCatalogDatabase();
-
+            final Database database = getCatalogDatabase();
             outputStream.println("------------------------------------------");
             outputStream.println("Successfully created " + jarOutputPath);
-
             for (String ddl : m_ddlFilePaths.keySet()) {
                 outputStream.println("Includes schema: " + m_ddlFilePaths.get(ddl));
             }
-
             outputStream.println();
-
             // Accumulate a summary of the summary for a briefer report
-            ArrayList<Procedure> nonDetProcs = new ArrayList<>();
-            ArrayList<Procedure> tableScans = new ArrayList<>();
+            List<Procedure> nonDetProcs = new ArrayList<>();
+            List<Procedure> tableScans = new ArrayList<>();
             int countSinglePartition = 0;
             int countMultiPartition = 0;
             int countDefaultProcs = 0;
@@ -1528,12 +1383,10 @@ public class VoltCompiler {
                 if (!p.getDefaultproc()) {
                     if (p.getSinglepartition()) {
                         countSinglePartition++;
-                    }
-                    else {
+                    } else {
                         countMultiPartition++;
                     }
-                }
-                else {
+                } else {
                     countDefaultProcs++;
                 }
                 if (p.getHasseqscans()) {
@@ -1541,9 +1394,9 @@ public class VoltCompiler {
                 }
 
                 outputStream.printf("[%s][%s] %s\n",
-                                      p.getSinglepartition() ? "SP" : "MP",
-                                      p.getReadonly() ? "READ" : "WRITE",
-                                      p.getTypeName());
+                        p.getSinglepartition() ? "SP" : "MP",
+                        p.getReadonly() ? "READ" : "WRITE",
+                        p.getTypeName());
                 for (Statement s : p.getStatements()) {
                     String seqScanTag = "";
                     if (s.getSeqscancount() > 0) {
@@ -1553,20 +1406,18 @@ public class VoltCompiler {
 
                     // if the proc is a java stored proc that is read&write,
                     // output determinism warnings
-                    if (p.getHasjava() && (!p.getReadonly())) {
-                        if (s.getIscontentdeterministic() == false) {
+                    if (p.getHasjava() && ! p.getReadonly()) {
+                        if (! s.getIscontentdeterministic()) {
                             determinismTag = "[NDC] ";
                             nonDetProcs.add(p);
-                        }
-                        else if (s.getIsorderdeterministic() == false) {
+                        } else if (! s.getIsorderdeterministic()) {
                             determinismTag = "[NDO] ";
                             nonDetProcs.add(p);
                         }
                     }
 
-                    String statementLine;
-                    String sqlText = s.getSqltext();
-                    sqlText = squeezeWhitespace(sqlText);
+                    final String sqlText = squeezeWhitespace(s.getSqltext());
+                    final String statementLine;
                     if (seqScanTag.length() + determinismTag.length() + sqlText.length() > 80) {
                         statementLine = "  " + (seqScanTag + determinismTag + sqlText).substring(0, 80) + "...";
                     } else {
@@ -1579,19 +1430,16 @@ public class VoltCompiler {
             outputStream.println("------------------------------------------\n");
 
             if (m_addedClasses.length > 0) {
-
                 if (m_addedClasses.length > 10) {
                     outputStream.printf("Added %d additional classes to the catalog jar.\n\n",
                             m_addedClasses.length);
-                }
-                else {
+                } else {
                     String logMsg = "Added the following additional classes to the catalog jar:\n";
                     for (String className : m_addedClasses) {
                         logMsg += "  " + className + "\n";
                     }
                     outputStream.println(logMsg);
                 }
-
                 outputStream.println("------------------------------------------\n");
             }
 
@@ -1617,24 +1465,21 @@ public class VoltCompiler {
                         "\tand do not run in parallel with other procedures.\n\n",
                         countMultiPartition);
             }
-            if (!tableScans.isEmpty()) {
+            if (! tableScans.isEmpty()) {
                 outputStream.printf("[TABLE SCAN] Catalog contains %d procedures that use a table scan:\n\n",
                         tableScans.size());
                 for (Procedure p : tableScans) {
                     outputStream.println("\t\t" + p.getClassname());
                 }
-                outputStream.printf(
-                        "\n\tTable scans do not use indexes and may become slower as tables grow.\n\n");
+                outputStream.printf("\n\tTable scans do not use indexes and may become slower as tables grow.\n\n");
             }
-            if (!nonDetProcs.isEmpty()) {
+            if (! nonDetProcs.isEmpty()) {
                 outputStream.println(
                         "[NDO][NDC] NON-DETERMINISTIC CONTENT OR ORDER WARNING:\n" +
                         "\tThe procedures listed below contain non-deterministic queries.\n");
-
                 for (Procedure p : nonDetProcs) {
                     outputStream.println("\t\t" + p.getClassname());
                 }
-
                 outputStream.printf(
                         "\n" +
                         "\tUsing the output of these queries as input to subsequent\n" +
@@ -1678,11 +1523,10 @@ public class VoltCompiler {
      * @return a possibly modified copy of the input sqltext
      **/
     private static String squeezeWhitespace(String sqltext) {
-        String compact = sqltext.replaceAll("\\s+", " ");
-        return compact;
+        return sqltext.replaceAll("\\s+", " ");
     }
 
-    public void summarizeErrors(PrintStream outputStream, PrintStream feedbackStream) {
+    void summarizeErrors(PrintStream outputStream, PrintStream feedbackStream) {
         if (outputStream != null) {
             outputStream.println("------------------------------------------");
             outputStream.println("Catalog compilation failed.");
@@ -1695,180 +1539,97 @@ public class VoltCompiler {
         }
     }
 
-    public List<Class<?>> getInnerClasses(Class <?> c)
-            throws VoltCompilerException {
+    List<Class<?>> getInnerClasses(Class <?> c) throws VoltCompilerException {
         ImmutableList.Builder<Class<?>> builder = ImmutableList.builder();
         ClassLoader cl = c.getClassLoader();
         if (cl == null) {
             cl = Thread.currentThread().getContextClassLoader();
         }
+        final ClassLoader cll = cl;
 
         // if loading from an InMemoryJarFile, the process is a bit different...
         if (cl instanceof JarLoader) {
-            String[] classes = ((JarLoader) cl).getInnerClassesForClass(c.getName());
-            for (String innerName : classes) {
-                Class<?> clz = null;
-                try {
-                    clz = cl.loadClass(innerName);
-                }
-                catch (ClassNotFoundException e) {
-                    String msg = "Unable to load " + c + " inner class " + innerName +
-                            " from in-memory jar representation.";
-                    throw new VoltCompilerException(msg);
-                }
-                assert(clz != null);
-                builder.add(clz);
+            for (String innerName : ((JarLoader) cl).getInnerClassesForClass(c.getName())) {
+                builder.add(PROTECTED_TRY.failableGet(
+                        () -> cll.loadClass(innerName), e -> {
+                            String msg = "Unable to load " + c + " inner class " + innerName +
+                                    " from in-memory jar representation.";
+                            return new VoltCompilerException(msg);
+                        }));
             }
-        }
-        else {
-            String stem = c.getName().replace('.', '/');
-            String cpath = stem + ".class";
-            URL curl = cl.getResource(cpath);
+        } else {
+            final String stem = c.getName().replace('.', '/');
+            final String cpath = stem + ".class";
+            final URL curl = cl.getResource(cpath);
             if (curl == null) {
                 throw new VoltCompilerException(String.format(
                         "Failed to find class file %s in jar.", cpath));
             }
-
-            // load from an on-disk jar
-            if ("jar".equals(curl.getProtocol())) {
+            if ("jar".equals(curl.getProtocol())) { // load from an on-disk jar
                 Pattern nameRE = Pattern.compile("\\A(" + stem + "\\$[^/]+).class\\z");
-                String jarFN;
-                try {
-                    jarFN = URLDecoder.decode(curl.getFile(), "UTF-8");
-                }
-                catch (UnsupportedEncodingException e) {
-                    String msg = "Unable to UTF-8 decode " + curl.getFile() + " for class " + c;
-                    throw new VoltCompilerException(msg);
-                }
+                String jarFN = PROTECTED_TRY.failableGet(() -> URLDecoder.decode(curl.getFile(), "UTF-8"),
+                        e -> {
+                            String msg = "Unable to UTF-8 decode " + curl.getFile() + " for class " + c;
+                            return new VoltCompilerException(msg);
+                        });
                 jarFN = jarFN.substring(5, jarFN.indexOf('!'));
-                JarFile jar = null;
-                try {
-                    jar = new JarFile(jarFN);
+                try (JarFile jar = new JarFile(jarFN)) {
                     Enumeration<JarEntry> entries = jar.entries();
                     while (entries.hasMoreElements()) {
-                        String name = entries.nextElement().getName();
-                        Matcher mtc = nameRE.matcher(name);
+                        final String name = entries.nextElement().getName();
+                        final Matcher mtc = nameRE.matcher(name);
                         if (mtc.find()) {
-                            String innerName = mtc.group(1).replace('/', '.');
-                            Class<?> inner;
-                            try {
-                                inner = cl.loadClass(innerName);
-                            } catch (ClassNotFoundException e) {
-                                String msg = "Unable to load " + c + " inner class " + innerName;
-                                throw new VoltCompilerException(msg);
-                            }
-                            builder.add(inner);
+                            final String innerName = mtc.group(1).replace('/', '.');
+                            builder.add(PROTECTED_TRY.failableGet(
+                                    () -> cll.loadClass(innerName),
+                                    e -> {
+                                        String msg = "Unable to load " + c + " inner class " + innerName;
+                                        return new VoltCompilerException(msg);
+                                    }));
                         }
                     }
-                }
-                catch (IOException e) {
+                } catch (IOException e) {
                     String msg = "Cannot access class " + c + " source code location of " + jarFN;
                     throw new VoltCompilerException(msg);
                 }
-                finally {
-                    if ( jar != null) try {jar.close();} catch (Exception ignoreIt) {};
-                }
-            }
-            // load directly from a classfile
-            else if ("file".equals(curl.getProtocol())) {
-                Pattern nameRE = Pattern.compile("/(" + stem + "\\$[^/]+).class\\z");
-                File sourceDH = new File(curl.getFile()).getParentFile();
+            } else if ("file".equals(curl.getProtocol())) { // load directly from a classfile
+                final Pattern nameRE = Pattern.compile("/(" + stem + "\\$[^/]+).class\\z");
+                final File sourceDH = new File(curl.getFile()).getParentFile();
                 for (File f: sourceDH.listFiles()) {
-                    Matcher mtc = nameRE.matcher(f.getAbsolutePath());
+                    final Matcher mtc = nameRE.matcher(f.getAbsolutePath());
                     if (mtc.find()) {
                         String innerName = mtc.group(1).replace('/', '.');
-                        Class<?> inner;
-                        try {
-                            inner = cl.loadClass(innerName);
-                        } catch (ClassNotFoundException e) {
-                            String msg = "Unable to load " + c + " inner class " + innerName;
-                            throw new VoltCompilerException(msg);
-                        }
-                        builder.add(inner);
+                        builder.add(PROTECTED_TRY.failableGet(
+                                () -> cll.loadClass(innerName),
+                                e -> {
+                                    String msg = "Unable to load " + c + " inner class " + innerName;
+                                    return new VoltCompilerException(msg);
+                                }));
                     }
                 }
-
             }
         }
         return builder.build();
     }
 
-    public boolean addClassToJar(InMemoryJarfile jarOutput, final Class<?> cls)
-            throws VoltCompiler.VoltCompilerException
-    {
-        if (m_cachedAddedClasses.contains(cls)) {
-            return false;
-        }
-        m_cachedAddedClasses.add(cls);
-
-        for (final Class<?> nested : getInnerClasses(cls)) {
-            addClassToJar(jarOutput, nested);
-        }
-
-        try {
-            return VoltCompilerUtils.addClassToJar(jarOutput, cls);
-        } catch (IOException e) {
-            throw new VoltCompilerException(e.getMessage());
-        }
+    public boolean addClassToJar(InMemoryJarfile jarOutput, final Class<?> cls) throws VoltCompilerException {
+        return PROTECTED_TRY.failableGet(
+                () -> {
+                    if (m_cachedAddedClasses.contains(cls)) {
+                        return false;
+                    } else {
+                        m_cachedAddedClasses.add(cls);
+                        for (final Class<?> nested : getInnerClasses(cls)) {
+                            addClassToJar(jarOutput, nested);
+                        }
+                        return VoltCompilerUtils.addClassToJar(jarOutput, cls);
+                    }
+                },
+                e -> new VoltCompilerException(e.getMessage()));
     }
 
     public void setInitializeDDLWithFiltering(boolean flag) {
         m_filterWithSQLCommand = flag;
-    }
-
-    /**
-     * Helper enum that scans sax exception messages for deprecated xml elements
-     *
-     * @author ssantoro
-     */
-    enum DeprecatedProjectElement {
-        security(
-                "(?i)\\Acvc-[^:]+:\\s+Invalid\\s+content\\s+.+?\\s+element\\s+'security'",
-                "security may be enabled in the deployment file only"
-                );
-
-        /**
-         * message regular expression that pertains to the deprecated element
-         */
-        private final Pattern messagePattern;
-        /**
-         * a suggestion string to exaplain alternatives
-         */
-        private final String suggestion;
-
-        DeprecatedProjectElement(String messageRegex, String suggestion) {
-            this.messagePattern = Pattern.compile(messageRegex);
-            this.suggestion = suggestion;
-        }
-
-        String getSuggestion() {
-            return suggestion;
-        }
-
-        /**
-         * Given a JAXBException it determines whether or not the linked
-         * exception is associated with a deprecated xml elements
-         *
-         * @param jxbex a {@link JAXBException}
-         * @return an enum of {@code DeprecatedProjectElement} if the
-         *    given exception corresponds to a deprecated xml element
-         */
-        static DeprecatedProjectElement valueOf( JAXBException jxbex) {
-            if(    jxbex == null
-                || jxbex.getLinkedException() == null
-                || ! (jxbex.getLinkedException() instanceof org.xml.sax.SAXParseException)
-            ) {
-                return null;
-            }
-            org.xml.sax.SAXParseException saxex =
-                    org.xml.sax.SAXParseException.class.cast(jxbex.getLinkedException());
-            for( DeprecatedProjectElement dpe: DeprecatedProjectElement.values()) {
-                Matcher mtc = dpe.messagePattern.matcher(saxex.getMessage());
-                if( mtc.find()) return dpe;
-            }
-
-            return null;
-        }
     }
 
     /**
@@ -1881,58 +1642,38 @@ public class VoltCompiler {
      * @throws VoltCompilerException
      *
      */
-    public void compileInMemoryJarfileWithNewDDL(InMemoryJarfile jarfile, String newDDL, List<SqlNode> sqlNodes, Catalog oldCatalog) throws IOException, VoltCompilerException
-    {
-        String oldDDL = new String(jarfile.get(VoltCompiler.AUTOGEN_DDL_FILE_NAME),
+    public void compileInMemoryJarfileWithNewDDL(
+            InMemoryJarfile jarfile, String newDDL, List<SqlNode> sqlNodes, Catalog oldCatalog)
+            throws IOException, VoltCompilerException {
+        final String oldDDL = new String(jarfile.get(VoltCompiler.AUTOGEN_DDL_FILE_NAME),
                 Constants.UTF8ENCODING);
         compilerLog.trace("OLD DDL: " + oldDDL);
 
-        VoltCompilerStringReader canonicalDDLReader = null;
-        VoltCompilerStringReader newDDLReader = null;
-
         // Use the in-memory jarfile-provided class loader so that procedure
         // classes can be found and copied to the new file that gets written.
-        ClassLoader originalClassLoader = m_classLoader;
-        try {
-            canonicalDDLReader = new VoltCompilerStringReader(VoltCompiler.AUTOGEN_DDL_FILE_NAME, oldDDL);
-            newDDLReader = new VoltCompilerStringReader("Ad Hoc DDL Input", newDDL);
-
-            List<VoltCompilerReader> ddlList = new ArrayList<>();
-            ddlList.add(newDDLReader);
+        try (VoltCompilerStringReader canonicalDDLReader =
+                     new VoltCompilerStringReader(VoltCompiler.AUTOGEN_DDL_FILE_NAME, oldDDL);
+            VoltCompilerStringReader newDDLReader =
+                    new VoltCompilerStringReader("Ad Hoc DDL Input", newDDL)) {
 
             m_classLoader = jarfile.getLoader();
             // Do the compilation work.
-            InMemoryJarfile jarOut = compileInternal(canonicalDDLReader, oldCatalog, ddlList, sqlNodes, jarfile);
+            final InMemoryJarfile jarOut = compileInternal(canonicalDDLReader, oldCatalog,
+                    Collections.singletonList(newDDLReader), sqlNodes, jarfile);
             // Trim the compiler output to try to provide a concise failure
             // explanation
             if (jarOut == null) {
                 String errString = "Adhoc DDL failed";
-                if (m_errors.size() > 0) {
+                if (! m_errors.isEmpty()) {
                     errString = m_errors.get(m_errors.size() - 1).getLogString();
                 }
-
                 int endtrim = errString.indexOf(" in statement starting");
-                if (endtrim < 0) { endtrim = errString.length(); }
-                String trimmed = errString.substring(0, endtrim);
-                throw new VoltCompilerException(trimmed);
-            }
-            compilerLog.debug("Successfully recompiled InMemoryJarfile");
-        }
-        finally {
-            // Restore the original class loader
-            m_classLoader = originalClassLoader;
-
-            if (canonicalDDLReader != null) {
-                try {
-                    canonicalDDLReader.close();
+                if (endtrim < 0) {
+                    endtrim = errString.length();
                 }
-                catch (IOException ioe) {}
-            }
-            if (newDDLReader != null) {
-                try {
-                    newDDLReader.close();
-                }
-                catch (IOException ioe) {}
+                throw new VoltCompilerException(errString.substring(0, endtrim));
+            } else {
+                compilerLog.debug("Successfully recompiled InMemoryJarfile");
             }
         }
     }
@@ -1947,9 +1688,7 @@ public class VoltCompiler {
      *
      */
     public void compileInMemoryJarfileForUpdateClasses(InMemoryJarfile jarOutput,
-            Catalog currentCatalog, HSQLInterface hsql)
-                    throws IOException, ClassNotFoundException, VoltCompilerException
-    {
+            Catalog currentCatalog, HSQLInterface hsql) throws IOException, ClassNotFoundException, VoltCompilerException {
         // clear out the warnings and errors
         m_warnings.clear();
         m_infos.clear();
@@ -1964,110 +1703,99 @@ public class VoltCompiler {
         byte[] ddlBytes = jarOutput.get(AUTOGEN_DDL_FILE_NAME);
         String canonicalDDL = new String(ddlBytes, Constants.UTF8ENCODING);
 
-        try {
-            CatalogMap<Procedure> procedures = db.getProcedures();
+        CatalogMap<Procedure> procedures = db.getProcedures();
 
-            // build a cache of previous SQL stmts
-            m_previousCatalogStmts.clear();
-            for (Procedure prevProc : procedures) {
-                for (Statement prevStmt : prevProc.getStatements()) {
-                    addStatementToCache(prevStmt);
-                }
+        // build a cache of previous SQL stmts
+        m_previousCatalogStmts.clear();
+        for (Procedure prevProc : procedures) {
+            for (Statement prevStmt : prevProc.getStatements()) {
+                addStatementToCache(prevStmt);
             }
-
-            // Use the in-memory jar-file-provided class loader so that procedure
-            // classes can be found and copied to the new file that gets written.
-            ClassLoader classLoader = jarOutput.getLoader();
-
-            for (Procedure procedure : procedures) {
-                if (! procedure.getHasjava()) {
-                    // Skip the DDL statement stored procedures as @UpdateClasses does not affect them
-                    continue;
-                }
-                // default procedure is also a single statement procedure
-                assert(procedure.getDefaultproc() == false);
-
-                if (procedure.getSystemproc()) {
-                    // UpdateClasses does not need to update system procedures
-                    continue;
-                }
-
-                // clear up the previous procedure contents before recompiling java user procedures
-                procedure.getStatements().clear();
-                procedure.getParameters().clear();
-
-                final String className = procedure.getClassname();
-
-                // Load the class given the class name
-                Class<?> procClass = classLoader.loadClass(className);
-                // get the short name of the class (no package)
-                String shortName = ProcedureCompiler.deriveShortProcedureName(className);
-
-                ProcedureAnnotation pa = (ProcedureAnnotation) procedure.getAnnotation();
-                if (pa == null) {
-                    pa = new ProcedureAnnotation();
-                    procedure.setAnnotation(pa);
-                }
-
-                // if the procedure is non-transactional, then take this special path here
-                if (VoltNonTransactionalProcedure.class.isAssignableFrom(procClass)) {
-                    ProcedureCompiler.compileNTProcedure(this, procClass, procedure, jarOutput);
-                    continue;
-                }
-
-                // if still here, that means the procedure is transactional
-                procedure.setTransactional(true);
-
-                // iterate through the fields and get valid sql statements
-                Map<String, SQLStmt> stmtMap = ProcedureCompiler.getSQLStmtMap(this, procClass);
-                Map<String, Object> fields = ProcedureCompiler.getFiledsMap(this, stmtMap, procClass, shortName);
-                Method procMethod = (Method) fields.get("@run");
-                assert(procMethod != null);
-
-                ProcedureCompiler.compileSQLStmtUpdatingProcedureInfomation(this, hsql, m_estimates, db, procedure,
-                        procedure.getSinglepartition(), fields);
-
-                // set procedure parameter types
-                Class<?>[] paramTypes = ProcedureCompiler.setParameterTypes(this, procedure, shortName, procMethod);
-
-                ProcedurePartitionData partitionData = ProcedurePartitionData.extractPartitionData(procedure);
-                ProcedureCompiler.addPartitioningInfo(this, procedure, db, paramTypes, partitionData);
-
-                // put the compiled code for this procedure into the jarFile
-                // need to find the outermost ancestor class for the procedure in the event
-                // that it's actually an inner (or inner inner...) class.
-                // addClassToJar recursively adds all the children, which should include this
-                // class
-                Class<?> ancestor = procClass;
-                while (ancestor.getEnclosingClass() != null) {
-                    ancestor = ancestor.getEnclosingClass();
-                }
-                addClassToJar(jarOutput, ancestor);
-            }
-
-            ////////////////////////////////////////////
-            // allow gc to reclaim any cache memory here
-            m_previousCatalogStmts.clear();
-
-        } catch (final VoltCompilerException e) {
-            throw e;
         }
 
+        // Use the in-memory jar-file-provided class loader so that procedure
+        // classes can be found and copied to the new file that gets written.
+        final ClassLoader classLoader = jarOutput.getLoader();
+
+        for (Procedure procedure : procedures) {
+            if (! procedure.getHasjava()) {
+                // Skip the DDL statement stored procedures as @UpdateClasses does not affect them
+                continue;
+            }
+            // default procedure is also a single statement procedure
+            assert(procedure.getDefaultproc() == false);
+
+            if (procedure.getSystemproc()) {
+                // UpdateClasses does not need to update system procedures
+                continue;
+            }
+
+            // clear up the previous procedure contents before recompiling java user procedures
+            procedure.getStatements().clear();
+            procedure.getParameters().clear();
+
+            final String className = procedure.getClassname();
+
+            // Load the class given the class name
+            final Class<?> procClass = classLoader.loadClass(className);
+            // get the short name of the class (no package)
+            final String shortName = ProcedureCompiler.deriveShortProcedureName(className);
+
+            ProcedureAnnotation pa = (ProcedureAnnotation) procedure.getAnnotation();
+            if (pa == null) {
+                pa = new ProcedureAnnotation();
+                procedure.setAnnotation(pa);
+            }
+
+            // if the procedure is non-transactional, then take this special path here
+            if (VoltNonTransactionalProcedure.class.isAssignableFrom(procClass)) {
+                ProcedureCompiler.compileNTProcedure(this, procClass, procedure, jarOutput);
+                continue;
+            }
+
+            // if still here, that means the procedure is transactional
+            procedure.setTransactional(true);
+
+            // iterate through the fields and get valid sql statements
+            final Map<String, SQLStmt> stmtMap = ProcedureCompiler.getSQLStmtMap(this, procClass);
+            final Map<String, Object> fields = ProcedureCompiler.getFiledsMap(this, stmtMap, procClass, shortName);
+            final Method procMethod = (Method) fields.get("@run");
+            assert(procMethod != null);
+
+            ProcedureCompiler.compileSQLStmtUpdatingProcedureInfomation(this, hsql, m_estimates, db, procedure,
+                    procedure.getSinglepartition(), fields);
+
+            // set procedure parameter types
+            final Class<?>[] paramTypes = ProcedureCompiler.setParameterTypes(this, procedure, shortName, procMethod);
+
+            final ProcedurePartitionData partitionData = ProcedurePartitionData.extractPartitionData(procedure);
+            ProcedureCompiler.addPartitioningInfo(this, procedure, db, paramTypes, partitionData);
+
+            // put the compiled code for this procedure into the jarFile
+            // need to find the outermost ancestor class for the procedure in the event
+            // that it's actually an inner (or inner inner...) class.
+            // addClassToJar recursively adds all the children, which should include this
+            // class
+            Class<?> ancestor = procClass;
+            while (ancestor.getEnclosingClass() != null) {
+                ancestor = ancestor.getEnclosingClass();
+            }
+            addClassToJar(jarOutput, ancestor);
+        }
+
+        ////////////////////////////////////////////
+        // allow gc to reclaim any cache memory here
+        m_previousCatalogStmts.clear();
+
         // generate the catalog report and write it to disk
-        generateCatalogReport(catalog, canonicalDDL, standaloneCompiler, m_warnings, jarOutput);
-
-        // WRITE CATALOG TO JAR HERE
-        final String catalogCommands = catalog.serialize();
-
-        byte[] catalogBytes = catalogCommands.getBytes(Constants.UTF8ENCODING);
+        generateCatalogReport(catalog, canonicalDDL, m_warnings, jarOutput);
 
         // Don't update buildinfo if it's already present, e.g. while upgrading.
         // Note when upgrading the version has already been updated by the caller.
         if (!jarOutput.containsKey(CatalogUtil.CATALOG_BUILDINFO_FILENAME)) {
             addBuildInfo(jarOutput);
         }
-        jarOutput.put(CatalogUtil.CATALOG_FILENAME, catalogBytes);
-
+        jarOutput.put(CatalogUtil.CATALOG_FILENAME, catalog.serialize().getBytes(Constants.UTF8ENCODING));
         assert(!hasErrors());
         if (hasErrors()) {
             StringBuilder sb = new StringBuilder();
@@ -2086,9 +1814,7 @@ public class VoltCompiler {
      * @return source version upgraded from or null if not upgraded
      * @throws IOException
      */
-    public String upgradeCatalogAsNeeded(InMemoryJarfile outputJar)
-                    throws IOException
-    {
+    public String upgradeCatalogAsNeeded(InMemoryJarfile outputJar) throws IOException {
         // getBuildInfoFromJar() performs some validation.
         String[] buildInfoLines = CatalogUtil.getBuildInfoFromJar(outputJar);
         String versionFromCatalog = buildInfoLines[0];
@@ -2097,7 +1823,7 @@ public class VoltCompiler {
 
         // Check if it's compatible (or the upgrade is being forced).
         // getConfig() may return null if it's being mocked for a test.
-        if (   VoltDB.Configuration.m_forceCatalogUpgrade
+        if (VoltDB.Configuration.m_forceCatalogUpgrade
             || !versionFromCatalog.equals(VoltDB.instance().getVersionString())) {
 
             // Patch the buildinfo.
@@ -2180,8 +1906,7 @@ public class VoltCompiler {
 
                 // Summarize the results to a file.
                 // Briefly log success or failure and mention the output text file.
-                PrintStream outputStream = new PrintStream(outputTextPath);
-                try {
+                try (PrintStream outputStream = new PrintStream(outputTextPath)) {
                     if (success) {
                         summarizeSuccess(outputStream, outputStream, outputJarPath);
                         consoleLog.info(String.format(
@@ -2207,9 +1932,6 @@ public class VoltCompiler {
                         throw new IOException(String.format(
                                 "Catalog upgrade failed. You will need to recompile using voltdb compile."));
                     }
-                }
-                finally {
-                    outputStream.close();
                 }
             }
             catch (IOException ioe) {
@@ -2263,10 +1985,8 @@ public class VoltCompiler {
         if (joinOrder != null) {
             joinOrderPrefix += joinOrder;
         }
-
         boolean partitioned = partitioning.wasSpecifiedAsSingle();
-
-        return joinOrderPrefix + String.valueOf(detMode.toChar()) + (partitioned ? "P#" : "R#");
+        return joinOrderPrefix + detMode.toChar() + (partitioned ? "P#" : "R#");
     }
 
     void addStatementToCache(Statement stmt) {
@@ -2280,34 +2000,29 @@ public class VoltCompiler {
 
     /** Look for a match from the previous catalog that matches the key + sql */
     Statement getCachedStatement(String keyPrefix, String sql) {
-        String key = keyPrefix + sql;
-
-        Statement candidate = m_previousCatalogStmts.get(key);
+        final Statement candidate = m_previousCatalogStmts.get(keyPrefix + sql);
         if (candidate == null) {
             ++m_stmtCacheMisses;
             return null;
-        }
-
-        // check that no underlying tables have been modified since the proc had been compiled
-        String[] tablesTouched = candidate.getTablesread().split(",");
-        for (String tableName : tablesTouched) {
-            if (isDirtyTable(tableName)) {
-                ++m_stmtCacheMisses;
-                return null;
+        } else {
+            // check that no underlying tables have been modified since the proc had been compiled
+            for (String tableName : candidate.getTablesread().split(",")) {
+                if (isDirtyTable(tableName)) {
+                    ++m_stmtCacheMisses;
+                    return null;
+                }
             }
-        }
-        tablesTouched = candidate.getTablesupdated().split(",");
-        for (String tableName : tablesTouched) {
-            if (isDirtyTable(tableName)) {
-                ++m_stmtCacheMisses;
-                return null;
+            for (String tableName : candidate.getTablesupdated().split(",")) {
+                if (isDirtyTable(tableName)) {
+                    ++m_stmtCacheMisses;
+                    return null;
+                }
             }
+            ++m_stmtCacheHits;
+            // easy debugging stmt
+            //printStmtCacheStats();
+            return candidate;
         }
-
-        ++m_stmtCacheHits;
-        // easy debugging stmt
-        //printStmtCacheStats();
-        return candidate;
     }
 
     private boolean isDirtyTable(String tableName) {

@@ -74,8 +74,8 @@ public abstract class AdHocNTBase extends UpdateApplicationBase {
     protected final static MiscUtils.BooleanSystemProperty DEBUG_MODE =
             new MiscUtils.BooleanSystemProperty("asynccompilerdebug");
 
-    BackendTarget m_backendTargetType = VoltDB.instance().getBackendTargetType();
-    boolean m_isConfiguredForNonVoltDBBackend = (m_backendTargetType == BackendTarget.HSQLDB_BACKEND ||
+    final BackendTarget m_backendTargetType = VoltDB.instance().getBackendTargetType();
+    final boolean m_isConfiguredForNonVoltDBBackend = (m_backendTargetType == BackendTarget.HSQLDB_BACKEND ||
                                                  m_backendTargetType == BackendTarget.POSTGRESQL_BACKEND ||
                                                  m_backendTargetType == BackendTarget.POSTGIS_BACKEND);
 

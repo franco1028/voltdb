@@ -22,8 +22,8 @@ import org.voltdb.newplanner.SqlTaskImpl;
 import org.voltdb.planner.PlanningErrorException;
 
 /**
- * A check that always fail.
- * @author Yiqun Zhang
+ * Real calcite check, that makes sure things like DDL/DQL/DML/etc. that is working
+ * in progress and are meant to be used are actually used.
  * @since 8.4
  */
 public class RealCalciteCheck extends CalciteCheck {

@@ -170,7 +170,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //Failed to plan for statement
         int foundPlanError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.contains("Failed to plan for statement")) {
+            if (f.getMessage().contains("Failed to plan for statement")) {
                 foundPlanError++;
             }
         }
@@ -211,7 +211,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //object not found: V_MYTABLE
         int foundDropError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.contains("object not found: V_MYTABLE")) {
+            if (f.getMessage().contains("object not found: V_MYTABLE")) {
                 foundDropError++;
             }
         }
@@ -262,7 +262,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //column is referenced in: PUBLIC.V_MYTABLE
         int foundDropError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.contains("column is referenced in: PUBLIC.V_MYTABLE")) {
+            if (f.getMessage().contains("column is referenced in: PUBLIC.V_MYTABLE")) {
                 foundDropError++;
             }
         }
@@ -313,7 +313,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //dependent objects exist
         int foundDepError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.toLowerCase().contains("dependent objects exist")) {
+            if (f.getMessage().toLowerCase().contains("dependent objects exist")) {
                 foundDepError++;
             }
         }
@@ -342,7 +342,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //dependent objects exist
         int foundDepError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.toLowerCase().contains("dependent objects exist")) {
+            if (f.getMessage().toLowerCase().contains("dependent objects exist")) {
                 foundDepError++;
             }
         }
@@ -371,7 +371,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //dependent objects exist - This should technically be ok as int to smallint with count should work....
         int foundDepError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.toLowerCase().contains("dependent objects exist")) {
+            if (f.getMessage().toLowerCase().contains("dependent objects exist")) {
                 foundDepError++;
             }
         }
@@ -432,7 +432,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //precision or scale out of range
         int foundSZError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.toLowerCase().contains("precision or scale out of range")) {
+            if (f.getMessage().toLowerCase().contains("precision or scale out of range")) {
                 foundSZError++;
             }
         }
@@ -474,7 +474,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //> 1048576 char maximum.
         int foundSZError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.toLowerCase().contains("> 1048576 char maximum.")) {
+            if (f.getMessage().toLowerCase().contains("> 1048576 char maximum.")) {
                 foundSZError++;
             }
         }
@@ -492,7 +492,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //> 1048576 char maximum.
         int foundSZError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.toLowerCase().contains("> 1048576 char maximum.")) {
+            if (f.getMessage().toLowerCase().contains("> 1048576 char maximum.")) {
                 foundSZError++;
             }
         }
@@ -519,7 +519,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //(max is 1024)
         int foundSZError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.toLowerCase().contains("(max is 1024)")) {
+            if (f.getMessage().toLowerCase().contains("(max is 1024)")) {
                 foundSZError++;
             }
         }
@@ -594,7 +594,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         // verify that warnings exist for foreign key
         int foundFKWarnings = 0;
         for (VoltCompiler.Feedback f : compiler.m_warnings) {
-            if (f.message.toLowerCase().contains("foreign")) {
+            if (f.getMessage().toLowerCase().contains("foreign")) {
                 foundFKWarnings++;
             }
         }
@@ -612,7 +612,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //type not found or user lacks privilege:
         int foundMissingError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.contains("object not found:")) {
+            if (f.getMessage().contains("object not found:")) {
                 foundMissingError++;
             }
         }
@@ -631,7 +631,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //type not found or user lacks privilege:
         int foundMissingError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.contains("object not found:")) {
+            if (f.getMessage().contains("object not found:")) {
                 foundMissingError++;
             }
         }
@@ -663,7 +663,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //type not found or user lacks privilege:
         int foundMissingError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.contains("type not found or user lacks privilege:")) {
+            if (f.getMessage().contains("type not found or user lacks privilege:")) {
                 foundMissingError++;
             }
         }
@@ -693,7 +693,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //Partition columns must be constrained "NOT NULL"
         int foundConstraintError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.contains("Partition columns must be constrained \"NOT NULL\"")) {
+            if (f.getMessage().contains("Partition columns must be constrained \"NOT NULL\"")) {
                 foundConstraintError++;
             }
         }
@@ -738,7 +738,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         //Partition columns must be constrained
         int foundConstraintError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.contains("Partition columns must be constrained")) {
+            if (f.getMessage().contains("Partition columns must be constrained")) {
                 foundConstraintError++;
             }
         }
@@ -810,7 +810,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         assertFalse(success);
         int foundNullPartitionColError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.toLowerCase().contains("partition columns must be constrained ")) {
+            if (f.getMessage().toLowerCase().contains("partition columns must be constrained ")) {
                 foundNullPartitionColError++;
             }
         }
@@ -827,7 +827,7 @@ public class TestVoltCompilerAlterDropTable extends TestCase {
         assertFalse(success);
         int foundAlreadyExistsError = 0;
         for (VoltCompiler.Feedback f : compiler.m_errors) {
-            if (f.message.toLowerCase().contains("name already exists ")) {
+            if (f.getMessage().toLowerCase().contains("name already exists ")) {
                 foundAlreadyExistsError++;
             }
         }
