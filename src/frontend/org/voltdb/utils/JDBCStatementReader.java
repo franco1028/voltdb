@@ -96,9 +96,10 @@ class JDBCStatementReader extends SusceptibleRunnable {
             conn = DriverManager.getConnection(m_config.jdbcurl, m_config.jdbcuser, m_config.jdbcpassword);
             DatabaseMetaData dbmd = conn.getMetaData();
             int resultSetType = ResultSet.TYPE_FORWARD_ONLY;
-            if (!dbmd.supportsResultSetType(resultSetType)) {
-                resultSetType = ResultSet.TYPE_SCROLL_INSENSITIVE;
-            }
+            // mysql driver not supoprt
+//            if (!dbmd.supportsResultSetType(resultSetType)) {
+//                resultSetType = ResultSet.TYPE_SCROLL_INSENSITIVE;
+//            }
             stmt = conn.prepareStatement(
                     "select * from " + m_config.jdbctable,
                     resultSetType,
